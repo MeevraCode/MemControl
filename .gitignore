@@ -2,3 +2,4 @@ MemControl.exe
 memcontrol.ini
 memcontrol.log
 tests/ProcessToolsTest.exe
+*.old.exe

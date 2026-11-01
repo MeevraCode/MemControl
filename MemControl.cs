@@ -33,9 +33,18 @@ static class Program
             return r.Errors.Count == 0 ? 0 : 1;
         }
         bool created;
-        using (var once = new Mutex(true, "Local\\MemControl", out created))
-        using (var ask = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\MemControlShow"))
+        // MEMCONTROL_INSTANCE (tests only): a separate single-instance name, so a test never meets your running copy.
+        string instance = Environment.GetEnvironmentVariable("MEMCONTROL_INSTANCE") ?? "";
+        using (var once = new Mutex(true, "Local\\MemControl" + instance, out created))
+        using (var ask = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\MemControlShow" + instance))
         {
+            // "/takeover" (Run as administrator): the copy that started this one is closing; wait for it, then run.
+            if (!created && args.Any(a => a.Equals("/takeover", StringComparison.OrdinalIgnoreCase)))
+            {
+                try { created = once.WaitOne(15000); }
+                catch (AbandonedMutexException) { created = true; } // it exited while holding the mutex: ours now
+                Log.Write("takeover: " + (created ? "the earlier copy closed, running now" : "the earlier copy did not close within 15 s"));
+            }
             if (!created) { if (show) ask.Set(); return 0; }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -487,7 +496,7 @@ class Tray : ApplicationContext
     {
         try
         {
-            Process.Start(new ProcessStartInfo(Program.Exe, "/show") { UseShellExecute = true, Verb = "runas" });
+            Process.Start(new ProcessStartInfo(Program.Exe, "/show /takeover") { UseShellExecute = true, Verb = "runas", WorkingDirectory = Program.Folder });
             Quit();
         }
         catch (Win32Exception) { /* the UAC window was declined: keep running as is */ }
