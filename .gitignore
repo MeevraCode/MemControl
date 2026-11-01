@@ -1,0 +1,4 @@
+MemControl.exe
+memcontrol.ini
+memcontrol.log
+tests/ProcessToolsTest.exe
