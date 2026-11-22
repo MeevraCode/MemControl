@@ -4,6 +4,7 @@
 // Cleaning: process working sets, the system file cache, the modified page list, the standby list (low priority or
 // all), page combining and the registry cache (NtSetSystemInformation, the same native calls Mem Reduct uses).
 // Every area except the working sets of your own programs needs administrator rights.
+// Smart automatic cleaning and the commit warning are in Smart.cs, "Always run as administrator" in AdminTask.cs.
 // Build: build.cmd (the .NET Framework compiler built into Windows). Settings: memcontrol.ini beside the exe.
 using System;
 using System.Collections.Generic;
@@ -22,41 +23,86 @@ static class Program
 {
     // "/show" opens the window (a running MemControl opens its own); "/processes" opens the process manager;
     // "/clean" cleans once, writes the result to memcontrol.log and exits (no window, no tray).
+    // "/takeover" replaces the running copy; "/admintask ..." is the one-time setup of "Always run as administrator".
     [STAThread]
     static int Main(string[] args)
     {
-        bool show = args.Any(a => a.Equals("/show", StringComparison.OrdinalIgnoreCase));
-        if (args.Any(a => a.Equals("/clean", StringComparison.OrdinalIgnoreCase)))
+        Func<string, bool> has = flag => args.Any(a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
+        int named = Array.FindIndex(args, a => a.Equals("/instance", StringComparison.OrdinalIgnoreCase));
+        if (named >= 0 && named + 1 < args.Length) Instance = args[named + 1];
+        bool show = has("/show"), processes = has("/processes"), takeover = has("/takeover");
+        if (has("/clean"))
         {
-            var r = Cleaner.Clean(Settings.Load().Areas);
+            var settings = Settings.Load();
+            var r = Cleaner.Clean(settings.Areas, new CleanOptions(settings.Exclude));
             Log.Write("clean (/clean): " + r.Summary());
             return r.Errors.Count == 0 ? 0 : 1;
         }
+        int setup = Array.FindIndex(args, a => a.Equals("/admintask", StringComparison.OrdinalIgnoreCase));
+        if (setup >= 0) return AdminTask.Command(args.Skip(setup + 1).ToArray());
+
         bool created;
-        // MEMCONTROL_INSTANCE (tests only): a separate single-instance name, so a test never meets your running copy.
-        string instance = Environment.GetEnvironmentVariable("MEMCONTROL_INSTANCE") ?? "";
-        using (var once = new Mutex(true, "Local\\MemControl" + instance, out created))
-        using (var ask = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\MemControlShow" + instance))
+        using (var once = Shared.OpenMutex("Local\\MemControl" + Instance, out created))
+        using (var ask = Shared.OpenEvent("Local\\MemControlShow" + Instance))
+        using (var askProcesses = Shared.OpenEvent("Local\\MemControlProcesses" + Instance))
+        using (var quit = Shared.OpenEvent("Local\\MemControlQuit" + Instance))
         {
-            // "/takeover" (Run as administrator): the copy that started this one is closing; wait for it, then run.
-            if (!created && args.Any(a => a.Equals("/takeover", StringComparison.OrdinalIgnoreCase)))
+            // "/takeover": this copy replaces the running one. It asks that copy to close and waits for it.
+            if (!created && takeover)
             {
+                quit.Set();
                 try { created = once.WaitOne(15000); }
                 catch (AbandonedMutexException) { created = true; } // it exited while holding the mutex: ours now
+                quit.Reset(); // if nobody was left to hear the request, this copy must not hear it itself
                 Log.Write("takeover: " + (created ? "the earlier copy closed, running now" : "the earlier copy did not close within 15 s"));
             }
-            if (!created) { if (show) ask.Set(); return 0; }
+            if (!created) { if (show) ask.Set(); if (processes) askProcesses.Set(); return 0; }
+
+            // "Always run as administrator": a copy started without the rights hands over to the one its task starts.
+            if (!takeover && !Native.IsAdmin() && Settings.Load().AlwaysAdmin)
+            {
+                var task = AdminTask.State();
+                if (task == AdminTask.Status.Ready && HandOver(once)) { if (show) ask.Set(); if (processes) askProcesses.Set(); return 0; }
+                Log.Write("always run as administrator: " + (task == AdminTask.Status.Ready ? "the elevated copy did not start"
+                    : task == AdminTask.Status.Missing ? "its task is missing"
+                    : task == AdminTask.Status.OtherCopy ? "its task starts another copy or is disabled" : "its task cannot be read")
+                    + "; running without the rights (tick the box again to repair)");
+            }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            var tray = new Tray(ask, show);
-            if (args.Any(a => a.Equals("/processes", StringComparison.OrdinalIgnoreCase))) tray.ShowProcesses(null);
+            var tray = new Tray(ask, askProcesses, quit, show);
+            if (processes) tray.ShowProcesses(null);
             Application.Run(tray);
         }
         return 0;
     }
 
+    // Starts the elevated copy through the task, lets go of the single-instance mutex and waits until that copy holds it.
+    // False when nobody came within 15 s: this copy then holds the mutex again and runs as it is.
+    static bool HandOver(Mutex once)
+    {
+        if (!AdminTask.Run()) return false;
+        once.ReleaseMutex();
+        var until = DateTime.UtcNow.AddSeconds(15);
+        while (true)
+        {
+            Thread.Sleep(200);
+            bool mine;
+            try { mine = once.WaitOne(0); }
+            catch (AbandonedMutexException) { mine = true; }
+            if (!mine) return true;
+            if (DateTime.UtcNow >= until) return false;
+            once.ReleaseMutex();
+        }
+    }
+
     public static string Folder { get { return AppDomain.CurrentDomain.BaseDirectory; } }
     public static string Exe { get { return Application.ExecutablePath; } }
+
+    // For tests only ("/instance NAME" or the MEMCONTROL_INSTANCE variable): separate single-instance and task names,
+    // so a test never meets your running copy.
+    public static string Instance = Environment.GetEnvironmentVariable("MEMCONTROL_INSTANCE") ?? "";
+    public static string InstanceArgs { get { return Instance == "" ? "" : " /instance " + Instance; } }
 }
 
 [Flags]
@@ -96,6 +142,12 @@ class Settings
     public bool Notify = true;
     public bool Hotkey = true;
     public double KernelYellowGb = 4, KernelRedGb = 8;
+    public bool Gentle = true;            // automatic cleaning leaves busy programs and the one in front alone
+    public bool PauseFullScreen = true;   // no automatic cleaning while a full-screen program (a game) is in front
+    public HashSet<string> Exclude = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // "Never clean": program names
+    public bool CommitWarn = true;
+    public int CommitYellow = 85, CommitRed = 93; // % of the largest commit limit Windows can reach
+    public bool AlwaysAdmin;              // a copy started without administrator rights restarts itself through the task
 
     static string File_ { get { return Path.Combine(Program.Folder, "memcontrol.ini"); } }
 
@@ -122,6 +174,13 @@ class Settings
                     case "hotkey": s.Hotkey = v == "1"; break;
                     case "kernelYellowGb": if (double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out d)) s.KernelYellowGb = d; break;
                     case "kernelRedGb": if (double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out d)) s.KernelRedGb = d; break;
+                    case "gentle": s.Gentle = v == "1"; break;
+                    case "pauseFullScreen": s.PauseFullScreen = v == "1"; break;
+                    case "never": s.Exclude = ProgramList.Parse(v); break;
+                    case "commitWarn": s.CommitWarn = v == "1"; break;
+                    case "commitYellow": if (int.TryParse(v, out n)) s.CommitYellow = Math.Max(50, Math.Min(99, n)); break;
+                    case "commitRed": if (int.TryParse(v, out n)) s.CommitRed = Math.Max(50, Math.Min(100, n)); break;
+                    case "alwaysAdmin": s.AlwaysAdmin = v == "1"; break;
                 }
             }
         }
@@ -138,6 +197,8 @@ class Settings
                 "areas=" + (int)Areas, "autoOnPercent=" + (AutoOnPercent ? 1 : 0), "autoPercent=" + AutoPercent,
                 "autoEvery=" + (AutoEvery ? 1 : 0), "everyMinutes=" + EveryMinutes, "notify=" + (Notify ? 1 : 0),
                 "hotkey=" + (Hotkey ? 1 : 0), "kernelYellowGb=" + KernelYellowGb.ToString(inv), "kernelRedGb=" + KernelRedGb.ToString(inv),
+                "gentle=" + (Gentle ? 1 : 0), "pauseFullScreen=" + (PauseFullScreen ? 1 : 0), "never=" + ProgramList.Join(Exclude),
+                "commitWarn=" + (CommitWarn ? 1 : 0), "commitYellow=" + CommitYellow, "commitRed=" + CommitRed, "alwaysAdmin=" + (AlwaysAdmin ? 1 : 0),
             });
         }
         catch { }
@@ -282,7 +343,7 @@ static class Cleaner
 
     static readonly object gate = new object();
 
-    public static CleanResult Clean(Area areas)
+    public static CleanResult Clean(Area areas, CleanOptions options = null)
     {
         lock (gate)
         {
@@ -293,11 +354,16 @@ static class Cleaner
 
             if ((areas & Area.WorkingSets) != 0)
             {
-                if (profile && MemoryList(MemoryEmptyWorkingSets)) r.Done.Add(Names[Area.WorkingSets]);
+                // With administrator rights and nothing to leave alone, one Windows call empties every working set.
+                // Otherwise one process at a time, so that some can be skipped.
+                bool leave = options != null && options.Any;
+                if (!leave && profile && MemoryList(MemoryEmptyWorkingSets)) r.Done.Add(Names[Area.WorkingSets]);
                 else
                 {
-                    int trimmed = TrimOwnProcesses();
-                    if (trimmed > 0) r.Done.Add(Names[Area.WorkingSets] + " (" + trimmed + " processes" + (admin ? "" : ", yours only") + ")");
+                    if (admin) Native.EnablePrivilege("SeDebugPrivilege"); // to open services and other accounts' programs
+                    int left;
+                    int trimmed = TrimProcesses(Candidates(), options, out left);
+                    if (trimmed > 0 || left > 0) r.Done.Add(Names[Area.WorkingSets] + " (" + trimmed + (trimmed == 1 ? " process" : " processes") + (admin ? "" : ", yours only") + (left > 0 ? ", " + left + " left alone" : "") + ")");
                     else r.Errors.Add(Names[Area.WorkingSets]);
                 }
             }
@@ -350,21 +416,34 @@ static class Cleaner
         finally { Marshal.FreeHGlobal(p); }
     }
 
-    // Without admin rights: the working sets of the programs this user may open (PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA).
-    static int TrimOwnProcesses()
+    static List<ProcInfo> Candidates()
     {
-        int done = 0, self = Process.GetCurrentProcess().Id;
+        var all = Sys.Processes();
+        if (all.Count > 0) return all;
         foreach (var p in Process.GetProcesses())
         {
-            try
-            {
-                if (p.Id == 0 || p.Id == 4 || p.Id == self) continue;
-                IntPtr h = Native.OpenProcess(0x1000 | 0x0100, false, p.Id);
-                if (h == IntPtr.Zero) continue;
-                try { if (Native.EmptyWorkingSet(h)) done++; } finally { Native.CloseHandle(h); }
-            }
+            try { all.Add(new ProcInfo { Pid = p.Id, Name = p.ProcessName }); }
             catch { }
             finally { p.Dispose(); }
+        }
+        return all;
+    }
+
+    /// <summary>
+    /// Empties the working set of each given process that this account may open (PROCESS_QUERY_LIMITED_INFORMATION |
+    /// PROCESS_SET_QUOTA), except those the options leave alone. Returns how many were emptied.
+    /// </summary>
+    public static int TrimProcesses(IEnumerable<ProcInfo> processes, CleanOptions options, out int left)
+    {
+        left = 0;
+        int done = 0, self = Process.GetCurrentProcess().Id;
+        foreach (var p in processes)
+        {
+            if (p.Pid == 0 || p.Pid == 4 || p.Pid == self) continue;
+            if (options != null && options.Skips(p)) { left++; continue; }
+            IntPtr h = Native.OpenProcess(0x1000 | 0x0100, false, p.Pid);
+            if (h == IntPtr.Zero) continue;
+            try { if (Native.EmptyWorkingSet(h)) done++; } finally { Native.CloseHandle(h); }
         }
         return done;
     }
@@ -384,8 +463,16 @@ class Tray : ApplicationContext
     IntPtr iconHandle = IntPtr.Zero;
     MainWindow window;
     bool cleaning;
+    readonly Activity activity = new Activity();
+    public readonly AutoPolicy Policy = new AutoPolicy();
+    public List<ProcInfo> Processes = new List<ProcInfo>();
+    public CommitState Commit = new CommitState();
+    public string AutoStatus = "", Largest = "";
+    DateTime lastSample = DateTime.MinValue, lastCeiling = DateTime.MinValue, lastCommitWarning = DateTime.MinValue, handOverAt = DateTime.MinValue;
+    double ceilingGb;
+    int commitLevel = -1;
 
-    public Tray(EventWaitHandle ask, bool show)
+    public Tray(EventWaitHandle ask, EventWaitHandle askProcesses, EventWaitHandle quit, bool show)
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open", null, (o, e) => ShowWindow());
@@ -402,7 +489,13 @@ class Tray : ApplicationContext
         hotkeys.Pressed += () => CleanNow("Ctrl+Shift+F1");
         ApplyHotkey();
         askTimer.Interval = 500;
-        askTimer.Tick += (o, e) => { if (ask.WaitOne(0)) ShowWindow(); };
+        askTimer.Tick += (o, e) =>
+        {
+            // Another copy takes over (Run as administrator): have it reopen the window if it is open here, then close.
+            if (quit.WaitOne(0)) { if (window != null && !window.IsDisposed && window.Visible) ask.Set(); Quit(); return; }
+            if (ask.WaitOne(0)) ShowWindow();
+            if (askProcesses.WaitOne(0)) ShowProcesses(null);
+        };
         askTimer.Start();
         tick.Interval = 2000;
         tick.Tick += (o, e) => Update();
@@ -427,20 +520,100 @@ class Tray : ApplicationContext
             lastHistory = Last.At;
             if (History.Count > 360) History.RemoveAt(0); // 60 min
         }
+        if (Last.At - lastSample >= TimeSpan.FromSeconds(10)) Sample();
+        if (Last.At - lastCeiling >= TimeSpan.FromSeconds(30)) { lastCeiling = Last.At; ceilingGb = PageFile.Read(Last).CeilingGb; }
+        Commit = new CommitState { CommitGb = Last.CommitGb, LimitGb = Last.CommitLimitGb, CeilingGb = Math.Max(ceilingGb, Last.CommitLimitGb) };
+        if (handOverAt != DateTime.MinValue && Last.At - handOverAt > TimeSpan.FromSeconds(10))
+        {
+            handOverAt = DateTime.MinValue;
+            Log.Write("run as administrator: the task did not start the elevated copy, asking with a prompt");
+            ElevateWithPrompt();
+        }
         SetIcon();
         icon.Text = Clip(string.Format("RAM {0}% · free {1:0.0} GB · kernel {2:0.0} GB", Last.LoadPercent, Last.AvailGb, Last.KernelGb));
         AutoClean();
         KernelWatch();
+        CommitWatch();
         if (window != null && !window.IsDisposed && window.Visible) window.Refresh(this);
     }
 
+    // Every 10 s: what each process has used since the last look. It feeds "busy lately" and the largest holders of commit.
+    void Sample()
+    {
+        lastSample = DateTime.Now;
+        try
+        {
+            var all = Sys.Processes();
+            if (all.Count == 0) return;
+            activity.Sample(all, lastSample);
+            Processes = all;
+            Largest = Sys.Largest(all, 3);
+        }
+        catch { }
+    }
+
+    // Automatic cleaning: never within 2 minutes of the last one, not while a full-screen program is in front, and by
+    // RAM use only when AutoPolicy says so (it waits longer and longer while cleaning does not keep RAM under the limit).
     void AutoClean()
     {
-        if (cleaning || DateTime.Now - lastAuto < TimeSpan.FromMinutes(2)) return;
-        if (Settings.AutoOnPercent && Last.LoadPercent >= Settings.AutoPercent) { lastAuto = DateTime.Now; CleanNow("auto: RAM " + Last.LoadPercent + "%"); }
-        else if (Settings.AutoEvery && DateTime.Now - lastAuto >= TimeSpan.FromMinutes(Settings.EveryMinutes)
-            && (lastAuto != DateTime.MinValue || DateTime.Now - First.At >= TimeSpan.FromMinutes(Settings.EveryMinutes)))
-        { lastAuto = DateTime.Now; CleanNow("auto every " + Settings.EveryMinutes + " min"); }
+        AutoStatus = "";
+        if (cleaning || !(Settings.AutoOnPercent || Settings.AutoEvery)) return;
+        var now = DateTime.Now;
+        if (Settings.PauseFullScreen && Sys.FullScreen()) { AutoStatus = "paused: a full-screen program is in front"; return; }
+        bool tooSoon = now - lastAuto < TimeSpan.FromMinutes(2);
+        if (!tooSoon && Settings.AutoOnPercent && Policy.Due(now, Last.LoadPercent, Settings.AutoPercent))
+        {
+            lastAuto = now;
+            Policy.Done(now, Last.LoadPercent);
+            CleanNow("auto: RAM " + Last.LoadPercent + "%", true, "next no sooner than " + Policy.Next.ToString("HH:mm"));
+        }
+        else if (!tooSoon && Settings.AutoEvery && now - lastAuto >= TimeSpan.FromMinutes(Settings.EveryMinutes)
+            && (lastAuto != DateTime.MinValue || now - First.At >= TimeSpan.FromMinutes(Settings.EveryMinutes)))
+        { lastAuto = now; CleanNow("auto every " + Settings.EveryMinutes + " min", true); }
+        else if (Settings.AutoOnPercent && Last.LoadPercent >= Settings.AutoPercent)
+        {
+            DateTime floor = lastAuto.AddMinutes(2), next = Policy.Next > floor ? Policy.Next : floor;
+            AutoStatus = "waits until " + next.ToString("HH:mm") + ": RAM stays above the limit";
+        }
+    }
+
+    // Commit: memory that programs have reserved, against the largest limit Windows can reach. Cleaning cannot lower it.
+    // The level rises at once and falls only 3 points under a mark, so the warning does not repeat at the edge.
+    void CommitWatch()
+    {
+        if (!Settings.CommitWarn) { commitLevel = 0; return; }
+        int pct = Commit.Percent, yellow = Settings.CommitYellow, red = Settings.CommitRed;
+        int up = pct >= red ? 2 : pct >= yellow ? 1 : 0, held = pct >= red - 3 ? 2 : pct >= yellow - 3 ? 1 : 0;
+        int level = Math.Max(up, Math.Min(Math.Max(commitLevel, 0), held));
+        string size = string.Format("{0:0.0} of {1:0.0} GB", Commit.CommitGb, Commit.CeilingGb);
+        if (level == 1 && commitLevel < 1)
+            icon.ShowBalloonTip(15000, "Memory commit is " + pct + "% full", "Programs have reserved " + size + ". Largest: " + Largest + ".", ToolTipIcon.Info);
+        if (level == 2 && (commitLevel < 2 || DateTime.Now - lastCommitWarning > TimeSpan.FromMinutes(30)))
+        {
+            icon.ShowBalloonTip(20000, "Memory commit is " + pct + "% full", "Close a large program, or programs may fail for lack of memory. Largest: " + Largest + ".", ToolTipIcon.Warning);
+            lastCommitWarning = DateTime.Now;
+        }
+        if (level != commitLevel && commitLevel >= 0) Log.Write("commit " + pct + "% (" + size + "), level " + level + "; largest: " + Largest);
+        commitLevel = level;
+    }
+
+    // What a cleaning leaves alone. Always: the "Never clean" list. With a full-screen program in front: that program.
+    // In automatic cleaning with "Gentle": also the program in front and every program that was busy in the last 3 minutes.
+    CleanOptions Options(bool auto)
+    {
+        var options = new CleanOptions(Settings.Exclude);
+        bool gentle = auto && Settings.Gentle;
+        if (!gentle && !Sys.FullScreen()) return options;
+        if (DateTime.Now - lastSample > TimeSpan.FromSeconds(3)) Sample();
+        int front = Sys.ForegroundPid(), self = Process.GetCurrentProcess().Id;
+        var inFront = Processes.FirstOrDefault(p => p.Pid == front);
+        if (inFront != null && front != self && front > 4 && inFront.Name != "") options.SkipNames.Add(inFront.Name);
+        if (gentle)
+        {
+            var now = DateTime.Now;
+            foreach (var p in Processes) if (!activity.Idle(p, TimeSpan.FromMinutes(3), now)) options.SkipPids.Add(p.Pid);
+        }
+        return options;
     }
 
     void KernelWatch()
@@ -458,22 +631,24 @@ class Tray : ApplicationContext
         kernelLevel = level;
     }
 
-    public void CleanNow(string why)
+    /// <summary>Cleans in the background. An automatic cleaning is gentler (see Options); note is added to its log line.</summary>
+    public void CleanNow(string why, bool auto = false, string note = null)
     {
         if (cleaning) return;
         cleaning = true;
         var areas = Settings.Areas;
+        var options = Options(auto);
         var worker = new BackgroundWorker();
         CleanResult result = null;
-        worker.DoWork += (o, e) => result = Cleaner.Clean(areas);
+        worker.DoWork += (o, e) => result = Cleaner.Clean(areas, options);
         worker.RunWorkerCompleted += (o, e) =>
         {
             cleaning = false;
-            string line = DateTime.Now.ToString("HH:mm") + " " + why + ": " + (result != null ? result.Summary() : "failed");
-            Recent.Insert(0, line);
+            string summary = (result != null ? result.Summary() : "failed") + (note != null ? "; " + note : "");
+            Recent.Insert(0, DateTime.Now.ToString("HH:mm") + " " + why + ": " + summary);
             if (Recent.Count > 20) Recent.RemoveAt(Recent.Count - 1);
-            Log.Write(why + ": " + (result != null ? result.Summary() : "failed"));
-            if (Settings.Notify && result != null)
+            Log.Write(why + ": " + summary);
+            if (Settings.Notify && result != null && (!auto || result.FreedGb * 1024 >= 100)) // an automatic cleaning that freed next to nothing stays quiet
             {
                 string body = result.Skipped.Count > 0 ? "Some areas need administrator rights: open MemControl and choose Run as administrator." : "Available now: " + result.AfterGb.ToString("0.0") + " GB.";
                 icon.ShowBalloonTip(6000, "Freed " + (result.FreedGb * 1024).ToString("0") + " MB", body, ToolTipIcon.Info);
@@ -494,12 +669,45 @@ class Tray : ApplicationContext
 
     public void RestartAsAdmin()
     {
+        // Once "Always run as administrator" is set up, its task starts the elevated copy without a prompt, and that
+        // copy asks this one to close. If it has not come within 10 s, Update falls back to the prompt.
+        if (AdminTask.State() == AdminTask.Status.Ready && AdminTask.Run()) { handOverAt = DateTime.Now; return; }
+        ElevateWithPrompt();
+    }
+
+    void ElevateWithPrompt()
+    {
         try
         {
-            Process.Start(new ProcessStartInfo(Program.Exe, "/show /takeover") { UseShellExecute = true, Verb = "runas", WorkingDirectory = Program.Folder });
+            Process.Start(new ProcessStartInfo(Program.Exe, "/show /takeover" + Program.InstanceArgs) { UseShellExecute = true, Verb = "runas", WorkingDirectory = Program.Folder });
             Quit();
         }
         catch (Win32Exception) { /* the UAC window was declined: keep running as is */ }
+    }
+
+    /// <summary>Turns "Always run as administrator" on or off. Returns null, or why it could not be turned on.</summary>
+    public string SetAlwaysAdmin(bool on)
+    {
+        if (!on)
+        {
+            Settings.AlwaysAdmin = false;
+            Settings.Save();
+            if (Native.IsAdmin()) AdminTask.Delete(AdminTask.Name); // without the rights the task stays; unused, it does nothing
+            Log.Write("always run as administrator: off");
+            return null;
+        }
+        if (AdminTask.State() != AdminTask.Status.Ready)
+        {
+            string sid = AdminTask.UserSid();
+            string why = Native.IsAdmin() ? AdminTask.Create(AdminTask.Name, Program.Exe, AdminTask.Arguments, sid, true) : AdminTask.Elevated("create " + sid);
+            if (why == null && AdminTask.State() != AdminTask.Status.Ready) why = "the task was not created (see memcontrol.log)";
+            if (why != null) return why;
+        }
+        Settings.AlwaysAdmin = true;
+        Settings.Save();
+        Log.Write("always run as administrator: on");
+        if (!Native.IsAdmin()) RestartAsAdmin();
+        return null;
     }
 
     public void Quit() { icon.Visible = false; Native.UnregisterHotKey(hotkeys.Handle, 1); ExitThread(); }
@@ -523,8 +731,9 @@ class Tray : ApplicationContext
     void SetIcon()
     {
         int pct = Last.LoadPercent;
-        Color color = Last.KernelGb >= Settings.KernelRedGb || pct >= 90 ? Color.FromArgb(220, 53, 69)
-            : Last.KernelGb >= Settings.KernelYellowGb || pct >= 75 ? Color.FromArgb(230, 162, 30) : Color.FromArgb(40, 167, 90);
+        int commit = Settings.CommitWarn ? Commit.Percent : 0;
+        Color color = Last.KernelGb >= Settings.KernelRedGb || pct >= 90 || commit >= Settings.CommitRed ? Color.FromArgb(220, 53, 69)
+            : Last.KernelGb >= Settings.KernelYellowGb || pct >= 75 || commit >= Settings.CommitYellow ? Color.FromArgb(230, 162, 30) : Color.FromArgb(40, 167, 90);
         using (var bmp = new Bitmap(32, 32))
         using (var g = Graphics.FromImage(bmp))
         using (var brush = new SolidBrush(color))
@@ -571,14 +780,18 @@ class HotkeyWindow : NativeWindow
 class MainWindow : Form
 {
     readonly Tray tray;
-    readonly Label ram = new Label(), ramSub = new Label(), kernel = new Label(), kernelSub = new Label(), admin = new Label();
+    readonly Label ram = new Label(), ramSub = new Label(), commit = new Label(), kernel = new Label(), kernelSub = new Label(), admin = new Label(), autoStatus = new Label();
     readonly Bar ramBar = new Bar();
     readonly Graph graph = new Graph();
     readonly ListView top = new ListView(), recent = new ListView();
     readonly Button clean = new Button(), elevate = new Button();
     readonly Dictionary<Area, CheckBox> boxes = new Dictionary<Area, CheckBox>();
-    readonly CheckBox autoPct = new CheckBox(), autoEvery = new CheckBox(), notify = new CheckBox(), hotkey = new CheckBox();
+    readonly CheckBox autoPct = new CheckBox(), autoEvery = new CheckBox(), notify = new CheckBox(), hotkey = new CheckBox(),
+        gentle = new CheckBox(), pause = new CheckBox(), commitWarn = new CheckBox(), always = new CheckBox();
+    readonly TextBox never = new TextBox();
     readonly NumericUpDown pct = new NumericUpDown(), every = new NumericUpDown();
+    readonly ToolTip tips = new ToolTip { AutoPopDelay = 20000 };
+    readonly bool canAlways = AdminTask.Possible();
     DateTime lastTop = DateTime.MinValue;
     bool loading;
 
@@ -590,21 +803,24 @@ class MainWindow : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(760, 600);
+        ClientSize = new Size(760, 680);
         BackColor = Color.FromArgb(248, 249, 251);
 
         // Left column: RAM, kernel, graph, top programs.
         var head = Label("Memory (RAM)", 16, 12, true);
         ram.SetBounds(16, 34, 360, 40); ram.Font = new Font("Segoe UI", 22f, FontStyle.Bold);
         ramBar.SetBounds(16, 78, 360, 14);
-        ramSub.SetBounds(16, 96, 360, 40);
+        ramSub.SetBounds(16, 96, 360, 18);
+        commit.SetBounds(16, 116, 304, 20);
+        var commitWhat = new LinkLabel { Text = "Explain", AutoSize = true, Left = 326, Top = 116 };
+        commitWhat.LinkClicked += (o, e) => CommitHelp.Show(this, tray);
         var kHead = Label("Windows kernel", 16, 142, true);
         kernel.SetBounds(16, 162, 360, 24); kernel.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
         kernelSub.SetBounds(16, 188, 360, 74); kernelSub.ForeColor = Color.DimGray;
         var gHead = Label("Last 60 minutes", 16, 266, true);
         graph.SetBounds(16, 286, 360, 90);
         var tHead = Label("Top memory users", 16, 382, true);
-        top.SetBounds(16, 402, 360, 184); top.View = View.Details; top.FullRowSelect = true; top.HeaderStyle = ColumnHeaderStyle.Nonclickable;
+        top.SetBounds(16, 402, 360, 264); top.View = View.Details; top.FullRowSelect = true; top.HeaderStyle = ColumnHeaderStyle.Nonclickable;
         top.Columns.Add("Program", 168); top.Columns.Add("Processes", 74, HorizontalAlignment.Right); top.Columns.Add("MB", 90, HorizontalAlignment.Right);
         // Double-click a program: the process manager, filtered to it.
         top.DoubleClick += (o, e) => { if (top.SelectedItems.Count > 0) tray.ShowProcesses(top.SelectedItems[0].Text); };
@@ -618,8 +834,19 @@ class MainWindow : Form
         clean.BackColor = Color.FromArgb(40, 120, 220); clean.ForeColor = Color.White; clean.FlatStyle = FlatStyle.Flat; clean.FlatAppearance.BorderSize = 0;
         clean.Click += (o, e) => { tray.CleanNow("manually"); clean.Enabled = false; };
         admin.SetBounds(x, 62, 348, 36); admin.ForeColor = Color.DimGray;
-        elevate.SetBounds(x, 98, 240, 28); elevate.Text = "Run as administrator";
+        elevate.SetBounds(x, 98, 164, 28); elevate.Text = "Run as administrator";
         elevate.Click += (o, e) => tray.RestartAsAdmin();
+        always.SetBounds(x + 172, 100, 176, 24); always.Enabled = canAlways;
+        tips.SetToolTip(always, canAlways
+            ? "Windows asks once. After that MemControl gets administrator rights at every start, through a scheduled task named MemControl.\nAny program running under your account could use that task to get the same rights."
+            : "This Windows account is not an administrator, so there is no consent to remember.");
+        always.CheckedChanged += (o, e) =>
+        {
+            if (loading) return;
+            string why = tray.SetAlwaysAdmin(always.Checked);
+            if (why != null) MessageBox.Show(this, "\"Always run as administrator\" was not turned on: " + why + ".", "MemControl", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            loading = true; always.Checked = tray.Settings.AlwaysAdmin; loading = false;
+        };
         var aHead = Label("What to clean", x, 136, true);
         int y = 156;
         foreach (var kv in Cleaner.Names)
@@ -632,24 +859,37 @@ class MainWindow : Form
         var tip = Label("\"Standby list (all)\" frees the most, but Windows then rebuilds its cache (files open a bit slower for a while).", x, y + 2, false);
         tip.AutoSize = false; tip.Size = new Size(348, 34); tip.ForeColor = Color.DimGray; tip.Font = new Font("Segoe UI", 8.5f);
         y += 40;
-        var autoHead = Label("Automatic", x, y, true); y += 20;
+        var autoHead = Label("Automatic", x, y, true);
+        autoStatus.SetBounds(x + 80, y + 2, 268, 18); autoStatus.ForeColor = Color.DimGray; autoStatus.Font = new Font("Segoe UI", 8.5f); autoStatus.TextAlign = ContentAlignment.TopRight;
+        y += 20;
         autoPct.SetBounds(x, y, 210, 24); autoPct.Text = "Clean when RAM use ≥"; pct.SetBounds(x + 214, y, 52, 24); pct.Minimum = 50; pct.Maximum = 99;
         var pctUnit = Label("%", x + 270, y + 3, false); y += 28;
         autoEvery.SetBounds(x, y, 210, 24); autoEvery.Text = "Clean every"; every.SetBounds(x + 214, y, 52, 24); every.Minimum = 5; every.Maximum = 720;
         var everyUnit = Label("min", x + 270, y + 3, false); y += 28;
+        gentle.SetBounds(x, y, 348, 22); gentle.Text = "Gentle: skip busy programs and the one in front"; y += 22;
+        tips.SetToolTip(gentle, "Automatic cleaning then empties only programs that have done nothing for 3 minutes.\nPrograms you are using would take their memory straight back, which only slows them down.");
+        pause.SetBounds(x, y, 348, 22); pause.Text = "Pause during games and full-screen programs"; y += 24;
+        tips.SetToolTip(pause, "No automatic cleaning while a full-screen program is in front.\nCleaning by hand (Ctrl+Shift+F1) still works and leaves that program alone.");
+        var neverHead = Label("Never clean:", x, y + 3, false); never.SetBounds(x + 88, y, 260, 24); y += 28;
+        tips.SetToolTip(never, "Program names separated by commas, for example: game, obs64\nOr right-click a program in the process manager.");
+        never.Leave += (o, e) => SaveNever();
+        commitWarn.SetBounds(x, y, 348, 22); commitWarn.Text = "Warn when memory commit is almost full"; y += 22;
         notify.SetBounds(x, y, 348, 22); notify.Text = "Notify how much was freed"; y += 22;
         hotkey.SetBounds(x, y, 348, 22); hotkey.Text = "Clean with Ctrl+Shift+F1"; y += 28;
         EventHandler save = (o, e) =>
         {
             if (loading) return;
             var s = tray.Settings;
+            if (s.AutoPercent != (int)pct.Value || s.AutoOnPercent != autoPct.Checked) tray.Policy.Reset(); // a new limit acts at once
             s.AutoOnPercent = autoPct.Checked; s.AutoPercent = (int)pct.Value; s.AutoEvery = autoEvery.Checked; s.EveryMinutes = (int)every.Value;
+            s.Gentle = gentle.Checked; s.PauseFullScreen = pause.Checked; s.CommitWarn = commitWarn.Checked;
             s.Notify = notify.Checked; bool hk = s.Hotkey != hotkey.Checked; s.Hotkey = hotkey.Checked; s.Save();
             if (hk) tray.ApplyHotkey();
         };
         autoPct.CheckedChanged += save; pct.ValueChanged += save; autoEvery.CheckedChanged += save; every.ValueChanged += save; notify.CheckedChanged += save; hotkey.CheckedChanged += save;
+        gentle.CheckedChanged += save; pause.CheckedChanged += save; commitWarn.CheckedChanged += save;
         var rHead = Label("Recent cleanings", x, y, true); y += 20;
-        recent.SetBounds(x, y, 348, 586 - y); recent.View = View.Details; recent.HeaderStyle = ColumnHeaderStyle.None; recent.ShowItemToolTips = true; recent.Columns.Add("", 330);
+        recent.SetBounds(x, y, 348, 666 - y); recent.View = View.Details; recent.HeaderStyle = ColumnHeaderStyle.None; recent.ShowItemToolTips = true; recent.Columns.Add("", 330);
         var restart = new LinkLabel { Text = "Restart computer…", Left = 16, Top = 0, AutoSize = true };
         restart.LinkClicked += (o, e) => tray.AskRestart();
         kernelSub.Controls.Add(restart); restart.Top = 54;
@@ -657,8 +897,8 @@ class MainWindow : Form
         explain.LinkClicked += (o, e) => KernelHelp.Show(this, tray.Last);
         kernelSub.Controls.Add(explain);
 
-        Controls.AddRange(new Control[] { head, ram, ramBar, ramSub, kHead, kernel, kernelSub, gHead, graph, tHead, top, clean, admin, elevate, aHead, tip, autoHead, autoPct, pct, pctUnit, autoEvery, every, everyUnit, notify, hotkey, rHead, recent });
-        FormClosing += (o, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
+        Controls.AddRange(new Control[] { head, ram, ramBar, ramSub, commit, commitWhat, kHead, kernel, kernelSub, gHead, graph, tHead, top, clean, admin, elevate, always, aHead, tip, autoHead, autoStatus, autoPct, pct, pctUnit, autoEvery, every, everyUnit, gentle, pause, neverHead, never, commitWarn, notify, hotkey, rHead, recent });
+        FormClosing += (o, e) => { if (e.CloseReason == CloseReason.UserClosing) { SaveNever(); e.Cancel = true; Hide(); } };
         LoadSettings();
     }
 
@@ -674,7 +914,16 @@ class MainWindow : Form
         foreach (var kv in boxes) kv.Value.Checked = (s.Areas & kv.Key) != 0;
         autoPct.Checked = s.AutoOnPercent; pct.Value = s.AutoPercent; autoEvery.Checked = s.AutoEvery; every.Value = s.EveryMinutes;
         notify.Checked = s.Notify; hotkey.Checked = s.Hotkey;
+        gentle.Checked = s.Gentle; pause.Checked = s.PauseFullScreen; commitWarn.Checked = s.CommitWarn; always.Checked = s.AlwaysAdmin;
+        never.Text = ProgramList.Join(s.Exclude);
         loading = false;
+    }
+
+    void SaveNever()
+    {
+        var names = ProgramList.Parse(never.Text);
+        if (!names.SetEquals(tray.Settings.Exclude)) { tray.Settings.Exclude = names; tray.Settings.Save(); }
+        never.Text = ProgramList.Join(names);
     }
 
     public void Refresh(Tray t)
@@ -683,7 +932,10 @@ class MainWindow : Form
         ram.Text = string.Format("{0}% used", s.LoadPercent);
         ram.ForeColor = s.LoadPercent >= 90 ? Color.FromArgb(200, 40, 50) : s.LoadPercent >= 75 ? Color.FromArgb(190, 120, 0) : Color.FromArgb(30, 140, 70);
         ramBar.Value = s.LoadPercent;
-        ramSub.Text = string.Format("Available {0:0.0} of {1:0.0} GB · cache {2:0.0} GB\nCommitted {3:0.0} of {4:0.0} GB (with the page file)", s.AvailGb, s.TotalGb, s.CacheGb, s.CommitGb, s.CommitLimitGb);
+        ramSub.Text = string.Format("Available {0:0.0} of {1:0.0} GB · cache {2:0.0} GB", s.AvailGb, s.TotalGb, s.CacheGb);
+        var c = t.Commit;
+        commit.Text = string.Format("Committed {0:0.0} of {1:0.0} GB", c.CommitGb, c.LimitGb) + (c.CanGrow ? string.Format(", can grow to {0:0} GB", c.CeilingGb) : string.Format(" ({0}%), cannot grow", c.Percent));
+        commit.ForeColor = !t.Settings.CommitWarn || c.Percent < t.Settings.CommitYellow ? SystemColors.ControlText : c.Percent >= t.Settings.CommitRed ? Color.FromArgb(200, 40, 50) : Color.FromArgb(190, 120, 0);
         var set = t.Settings;
         kernel.Text = string.Format("{0:0.0} GB{1}", s.KernelGb, s.KernelGb >= set.KernelRedGb ? " — high" : s.KernelGb >= set.KernelYellowGb ? " — above normal" : " — normal");
         kernel.ForeColor = s.KernelGb >= set.KernelRedGb ? Color.FromArgb(200, 40, 50) : s.KernelGb >= set.KernelYellowGb ? Color.FromArgb(190, 120, 0) : Color.FromArgb(30, 140, 70);
@@ -693,8 +945,15 @@ class MainWindow : Form
         graph.Data = t.History;
         graph.Invalidate();
         bool isAdmin = Native.IsAdmin();
-        admin.Text = isAdmin ? "Running as administrator: every area can be cleaned." : "Without administrator rights only your own programs' working sets are cleaned. For all areas:";
+        admin.Text = isAdmin ? "Running as administrator: every area can be cleaned."
+            : t.Settings.AlwaysAdmin ? "\"Always run as administrator\" did not work at this start (see memcontrol.log). For all areas:"
+            : "Without administrator rights only your own programs' working sets are cleaned. For all areas:";
         elevate.Visible = !isAdmin;
+        always.Left = isAdmin ? elevate.Left : elevate.Left + 172; always.Width = isAdmin ? 348 : 176;
+        always.Text = isAdmin ? "Always run as administrator (no prompt)" : "Always (no prompt)";
+        if (always.Checked != t.Settings.AlwaysAdmin) { loading = true; always.Checked = t.Settings.AlwaysAdmin; loading = false; }
+        autoStatus.Text = t.AutoStatus;
+        if (!never.Focused) { string list = ProgramList.Join(t.Settings.Exclude); if (never.Text != list) never.Text = list; }
         clean.Enabled = !t.Cleaning;
         clean.Text = t.Cleaning ? "Cleaning…" : "Clean now";
         bool empty = t.Recent.Count == 0;

@@ -1,5 +1,5 @@
 MemControl.exe
 memcontrol.ini
 memcontrol.log
-tests/ProcessToolsTest.exe
+tests/*.exe
 *.old.exe

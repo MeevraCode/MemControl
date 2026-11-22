@@ -163,6 +163,19 @@ class ProcessWindow : Form
         menu.Items.Add("Trim memory", null, (o, e) => TrimSelected());
         menu.Items.Add("Open file location", null, (o, e) => Locate());
         menu.Items.Add("Copy path", null, (o, e) => { var r = Selected().FirstOrDefault(); if (r != null && r.Path != "") Clipboard.SetText(r.Path); });
+        menu.Items.Add(new ToolStripSeparator());
+        // The same list as "Never clean" in the main window: cleaning leaves every process of this program alone.
+        var neverClean = new ToolStripMenuItem("Never clean this program");
+        neverClean.Click += (o, e) =>
+        {
+            var r = Selected().FirstOrDefault();
+            if (r == null) return;
+            if (!tray.Settings.Exclude.Remove(r.Name)) tray.Settings.Exclude.Add(r.Name);
+            tray.Settings.Save();
+            status.Text = tray.Settings.Exclude.Contains(r.Name) ? r.Name + " will never be cleaned." : r.Name + " can be cleaned again.";
+        };
+        menu.Items.Add(neverClean);
+        menu.Opening += (o, e) => { var r = Selected().FirstOrDefault(); neverClean.Enabled = r != null; neverClean.Checked = r != null && tray.Settings.Exclude.Contains(r.Name); };
         list.ContextMenuStrip = menu;
 
         Controls.AddRange(new Control[] { find, filter, group, list, end, endTree, endAll, trim, locate, status });

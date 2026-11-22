@@ -45,18 +45,63 @@ string.Format("  • Total: {0:0.0} GB. Right after a restart it is normally 1�
         using (var form = new Form())
         {
             form.Text = "MemControl — kernel memory explained";
-            form.Font = new Font("Segoe UI", 10f);
-            form.StartPosition = FormStartPosition.CenterParent;
-            form.ClientSize = new Size(640, 560);
-            form.MinimizeBox = false;
-            var box = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Text = text, BackColor = Color.White,
-                Left = 12, Top = 12, Width = 616, Height = 490, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
-            var link = new LinkLabel { Text = "The driver leak report (GitHub)", AutoSize = true, Left = 12, Top = 520, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
-            link.LinkClicked += (o, e) => Process.Start("https://github.com/anthropics/claude-code/issues/96722");
-            var close = new Button { Text = "Close", Width = 100, Height = 30, Left = 528, Top = 516, Anchor = AnchorStyles.Bottom | AnchorStyles.Right, DialogResult = DialogResult.OK };
-            form.Controls.AddRange(new Control[] { box, link, close });
-            form.AcceptButton = close;
-            form.Shown += (o, e) => box.Select(0, 0);
+            TextWindow.Fill(form, text, "The driver leak report (GitHub)", "https://github.com/anthropics/claude-code/issues/96722");
+            form.ShowDialog(owner);
+        }
+    }
+}
+
+/// <summary>The read-only text, the link and the Close button that the explanation windows share.</summary>
+static class TextWindow
+{
+    public static void Fill(Form form, string text, string linkText, string url)
+    {
+        form.Font = new Font("Segoe UI", 10f);
+        form.StartPosition = FormStartPosition.CenterParent;
+        form.ClientSize = new Size(640, 560);
+        form.MinimizeBox = false;
+        var box = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Text = text, BackColor = Color.White,
+            Left = 12, Top = 12, Width = 616, Height = 490, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
+        var link = new LinkLabel { Text = linkText, AutoSize = true, Left = 12, Top = 520, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
+        link.LinkClicked += (o, e) => Process.Start(url);
+        var close = new Button { Text = "Close", Width = 100, Height = 30, Left = 528, Top = 516, Anchor = AnchorStyles.Bottom | AnchorStyles.Right, DialogResult = DialogResult.OK };
+        form.Controls.AddRange(new Control[] { box, link, close });
+        form.AcceptButton = close;
+        form.Shown += (o, e) => box.Select(0, 0);
+    }
+}
+
+// "Explain" beside the commit line: what commit is, with this PC's own numbers.
+static class CommitHelp
+{
+    public static void Show(IWin32Window owner, Tray tray)
+    {
+        var c = tray.Commit;
+        string text =
+"WHAT COMMIT IS\r\n" +
+"Every program reserves memory before it uses it. The sum of all reservations is the commit charge. Windows promises " +
+"only as much as the commit limit: your RAM plus the page file.\r\n" +
+string.Format("  • Now: {0:0.0} of {1:0.0} GB are reserved.\r\n", c.CommitGb, c.LimitGb) +
+(c.CanGrow
+    ? string.Format("  • Windows manages the page file here and can enlarge it, so the limit can rise to about {0:0} GB. Of that, {1}% is used.\r\n\r\n", c.CeilingGb, c.Percent)
+    : "  • The page file here cannot grow (a fixed size, no page file, or no free disk space), so this limit is final.\r\n\r\n") +
+"WHY IT MATTERS\r\n" +
+"When the reservations reach a limit that cannot rise, programs are refused memory: a game closes, a browser tab shows " +
+"\"out of memory\". This can happen while the RAM figure still looks moderate, because reserved memory counts whether " +
+"or not it is in RAM right now.\r\n\r\n" +
+"WHAT LOWERS IT\r\n" +
+"  • Closing programs, or the tabs, projects and virtual machines inside them.\r\n" +
+"  • Cleaning does not lower it. Cleaning moves memory out of RAM; the reservation stays.\r\n\r\n" +
+"THE LARGEST NOW\r\n" +
+(tray.Largest != "" ? "  • " + tray.Largest.Replace(", ", "\r\n  • ") + "\r\n\r\n" : "  • Still collecting.\r\n\r\n") +
+"WHAT THE COLORS MEAN\r\n" +
+string.Format("  • Yellow: {0}% of the limit that can be reached. Close something large when convenient.\r\n", tray.Settings.CommitYellow) +
+string.Format("  • Red: {0}%. Close a large program now.", tray.Settings.CommitRed);
+
+        using (var form = new Form())
+        {
+            form.Text = "MemControl — memory commit explained";
+            TextWindow.Fill(form, text, "Page files explained (Microsoft)", "https://learn.microsoft.com/troubleshoot/windows-client/performance/introduction-to-the-page-file");
             form.ShowDialog(owner);
         }
     }
