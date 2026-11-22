@@ -1,5 +1,6 @@
 MemControl.exe
 memcontrol.ini
 memcontrol.log
+memcontrol-history.csv
 tests/*.exe
 *.old.exe

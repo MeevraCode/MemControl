@@ -28,9 +28,12 @@ static class Program
     static int Main(string[] args)
     {
         Func<string, bool> has = flag => args.Any(a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
-        int named = Array.FindIndex(args, a => a.Equals("/instance", StringComparison.OrdinalIgnoreCase));
-        if (named >= 0 && named + 1 < args.Length) Instance = args[named + 1];
+        Func<string, string> after = flag => { int at = Array.FindIndex(args, a => a.Equals(flag, StringComparison.OrdinalIgnoreCase)); return at >= 0 && at + 1 < args.Length ? args[at + 1] : null; };
+        string named = after("/instance"), home = after("/home");
+        if (named != null && named.Length <= 32 && named.All(char.IsLetterOrDigit)) Instance = named;
+        if (home != null && Path.IsPathRooted(home)) Home = home.TrimEnd('\\') + "\\";
         bool show = has("/show"), processes = has("/processes"), takeover = has("/takeover");
+        if (has("/status")) return Status();
         if (has("/clean"))
         {
             var settings = Settings.Load();
@@ -65,8 +68,9 @@ static class Program
                 if (task == AdminTask.Status.Ready && HandOver(once)) { if (show) ask.Set(); if (processes) askProcesses.Set(); return 0; }
                 Log.Write("always run as administrator: " + (task == AdminTask.Status.Ready ? "the elevated copy did not start"
                     : task == AdminTask.Status.Missing ? "its task is missing"
-                    : task == AdminTask.Status.OtherCopy ? "its task starts another copy or is disabled" : "its task cannot be read")
-                    + "; running without the rights (tick the box again to repair)");
+                    : task == AdminTask.Status.Outdated ? "the administrator copy in Program Files is older than this MemControl.exe"
+                    : task == AdminTask.Status.OtherCopy ? "its task starts another file or is disabled" : "its task cannot be read")
+                    + "; running without the rights (\"Run as administrator\" renews it with one prompt)");
             }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -96,7 +100,36 @@ static class Program
         }
     }
 
-    public static string Folder { get { return AppDomain.CurrentDomain.BaseDirectory; } }
+    public const string Version = "1.1.0";
+
+    [DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
+
+    // "/status": the state as one line of JSON, for scripts. Exit code 0 = fine, 1 = a yellow level, 2 = a red one.
+    static int Status()
+    {
+        var settings = Settings.Load();
+        var s = Native.Read();
+        var commit = PageFile.Read(s);
+        int kernel = s.KernelGb >= settings.KernelRedGb ? 2 : s.KernelGb >= settings.KernelYellowGb ? 1 : 0;
+        int reserved = commit.Percent >= settings.CommitRed ? 2 : commit.Percent >= settings.CommitYellow ? 1 : 0;
+        int ram = s.LoadPercent >= 90 ? 2 : s.LoadPercent >= 75 ? 1 : 0, level = Math.Max(ram, Math.Max(kernel, reserved));
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        Func<double, string> n = v => v.ToString("0.0", inv);
+        string largest = string.Join(",", Sys.Processes().Where(p => p.Name != "").GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(g => new { Name = g.Key, Bytes = g.Sum(p => p.PrivateBytes), Count = g.Count() }).OrderByDescending(g => g.Bytes).Take(5)
+            .Select(g => "{\"name\":\"" + g.Name.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\",\"gb\":" + n(g.Bytes / 1073741824.0) + ",\"processes\":" + g.Count + "}"));
+        string json = "{\"version\":\"" + Version + "\",\"level\":" + level
+            + ",\"ramPercent\":" + s.LoadPercent + ",\"ramLevel\":" + ram + ",\"availableGb\":" + n(s.AvailGb) + ",\"totalGb\":" + n(s.TotalGb)
+            + ",\"commitGb\":" + n(commit.CommitGb) + ",\"commitLimitGb\":" + n(commit.LimitGb) + ",\"commitCeilingGb\":" + n(commit.CeilingGb) + ",\"commitPercent\":" + commit.Percent + ",\"commitLevel\":" + reserved
+            + ",\"kernelGb\":" + n(s.KernelGb) + ",\"kernelLevel\":" + kernel + ",\"fileObjects\":" + s.StuckFiles
+            + ",\"fullScreen\":" + (Sys.FullScreen() ? "true" : "false") + ",\"administrator\":" + (Native.IsAdmin() ? "true" : "false") + ",\"largest\":[" + largest + "]}";
+        try { AttachConsole(-1); Console.WriteLine(json); } catch { }
+        return level;
+    }
+
+    /// <summary>Where the settings, the log and the history live: beside the exe, or where "/home" says (the administrator copy runs from Program Files).</summary>
+    public static string Folder { get { return Home ?? AppDomain.CurrentDomain.BaseDirectory; } }
+    public static string Home;
     public static string Exe { get { return Application.ExecutablePath; } }
 
     // For tests only ("/instance NAME" or the MEMCONTROL_INSTANCE variable): separate single-instance and task names,
@@ -120,7 +153,13 @@ enum Area
 
 static class Log
 {
+    // A copy with administrator rights writes as the plain user (AsUser), as it does for the settings and the history.
     public static void Write(string line)
+    {
+        try { AsUser.Run(() => WriteNow(line), true); } catch { }
+    }
+
+    static void WriteNow(string line)
     {
         try
         {
@@ -152,6 +191,13 @@ class Settings
     static string File_ { get { return Path.Combine(Program.Folder, "memcontrol.ini"); } }
 
     public static Settings Load()
+    {
+        Settings loaded = null;
+        try { AsUser.Run(() => loaded = LoadNow(), false); } catch { }
+        return loaded ?? new Settings();
+    }
+
+    static Settings LoadNow()
     {
         var s = new Settings();
         try
@@ -189,6 +235,11 @@ class Settings
     }
 
     public void Save()
+    {
+        try { AsUser.Run(SaveNow, true); } catch { }
+    }
+
+    void SaveNow()
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         try
@@ -471,12 +522,24 @@ class Tray : ApplicationContext
     DateTime lastSample = DateTime.MinValue, lastCeiling = DateTime.MinValue, lastCommitWarning = DateTime.MinValue, handOverAt = DateTime.MinValue;
     double ceilingGb;
     int commitLevel = -1;
+    public readonly Growth Growth = new Growth();
+    public readonly KernelTags Tags = new KernelTags();
+    public readonly List<HistoryPoint> LongHistory = new List<HistoryPoint>(); // one point every 5 minutes, 7 days; the same points are on disk
+    public readonly DateTime Boot = Sys.BootTime();
+    public string KernelForecast = "";
+    DateTime lastSlow = DateTime.MinValue, lastLong = DateTime.MinValue, earlierAt = DateTime.MinValue;
+    List<ProcInfo> earlier;
+    HealthWindow health;
+    LeakWindow leaks;
+    bool renewing;
 
     public Tray(EventWaitHandle ask, EventWaitHandle askProcesses, EventWaitHandle quit, bool show)
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open", null, (o, e) => ShowWindow());
         menu.Items.Add("Clean now", null, (o, e) => CleanNow("manually"));
+        menu.Items.Add("Why is it slow?", null, (o, e) => ShowHealth());
+        menu.Items.Add("Leak watch", null, (o, e) => ShowLeaks());
         menu.Items.Add("Processes…", null, (o, e) => ShowProcesses(null));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Restart computer…", null, (o, e) => AskRestart());
@@ -497,6 +560,8 @@ class Tray : ApplicationContext
             if (askProcesses.WaitOne(0)) ShowProcesses(null);
         };
         askTimer.Start();
+        HistoryFile.Trim();
+        LongHistory.AddRange(HistoryFile.Read(DateTime.Now.AddDays(-7)));
         tick.Interval = 2000;
         tick.Tick += (o, e) => Update();
         tick.Start();
@@ -521,6 +586,7 @@ class Tray : ApplicationContext
             if (History.Count > 360) History.RemoveAt(0); // 60 min
         }
         if (Last.At - lastSample >= TimeSpan.FromSeconds(10)) Sample();
+        if (Last.At - lastLong >= TimeSpan.FromMinutes(5)) LongSample();
         if (Last.At - lastCeiling >= TimeSpan.FromSeconds(30)) { lastCeiling = Last.At; ceilingGb = PageFile.Read(Last).CeilingGb; }
         Commit = new CommitState { CommitGb = Last.CommitGb, LimitGb = Last.CommitLimitGb, CeilingGb = Math.Max(ceilingGb, Last.CommitLimitGb) };
         if (handOverAt != DateTime.MinValue && Last.At - handOverAt > TimeSpan.FromSeconds(10))
@@ -540,16 +606,49 @@ class Tray : ApplicationContext
     // Every 10 s: what each process has used since the last look. It feeds "busy lately" and the largest holders of commit.
     void Sample()
     {
-        lastSample = DateTime.Now;
+        var now = DateTime.Now;
+        lastSample = now;
         try
         {
             var all = Sys.Processes();
             if (all.Count == 0) return;
-            activity.Sample(all, lastSample);
+            if (earlier != null) Sys.Rates(earlier, all, (now - earlierAt).TotalSeconds);
+            earlier = all;
+            earlierAt = now;
+            activity.Sample(all, now);
             Processes = all;
             Largest = Sys.Largest(all, 3);
+            if (now - lastSlow >= TimeSpan.FromSeconds(60)) { lastSlow = now; Growth.Sample(all); Tags.Sample(now); } // once a minute: the leak watch
         }
         catch { }
+    }
+
+    long BootMinute { get { return Boot == DateTime.MinValue ? 0 : Boot.Ticks / TimeSpan.TicksPerMinute; } }
+
+    // Every 5 minutes: one point for the long graph, kept on disk too, and the forecast of a kernel leak, made from
+    // the points of this Windows session only (a restart frees kernel memory).
+    void LongSample()
+    {
+        lastLong = Last.At;
+        var point = new HistoryPoint { At = Last.At, Load = Last.LoadPercent, CommitGb = Last.CommitGb, KernelGb = Last.KernelGb, Files = Last.StuckFiles, BootMinute = BootMinute };
+        LongHistory.Add(point);
+        while (LongHistory.Count > 2100) LongHistory.RemoveAt(0);
+        HistoryFile.Append(point);
+        long boot = BootMinute;
+        var session = LongHistory.Where(p => Math.Abs(p.BootMinute - boot) <= 5).ToList();
+        KernelForecast = Forecast.Text(Forecast.KernelGbPerDay(session), Last.KernelGb, Settings.KernelYellowGb, Settings.KernelRedGb);
+    }
+
+    public void ShowHealth()
+    {
+        if (health == null || health.IsDisposed) health = new HealthWindow(this);
+        health.Open();
+    }
+
+    public void ShowLeaks()
+    {
+        if (leaks == null || leaks.IsDisposed) leaks = new LeakWindow(this);
+        leaks.Open();
     }
 
     // Automatic cleaning: never within 2 minutes of the last one, not while a full-screen program is in front, and by
@@ -669,9 +768,19 @@ class Tray : ApplicationContext
 
     public void RestartAsAdmin()
     {
-        // Once "Always run as administrator" is set up, its task starts the elevated copy without a prompt, and that
-        // copy asks this one to close. If it has not come within 10 s, Update falls back to the prompt.
-        if (AdminTask.State() == AdminTask.Status.Ready && AdminTask.Run()) { handOverAt = DateTime.Now; return; }
+        // Once "Always run as administrator" is set up, its task starts the administrator copy without a prompt, and
+        // that copy asks this one to close. If it has not come within 10 s, Update falls back to the prompt.
+        var task = AdminTask.State();
+        if (task == AdminTask.Status.Ready && AdminTask.Run()) { handOverAt = DateTime.Now; return; }
+        // The option is on but the copy in Program Files is older or gone (MemControl was updated): renewing it takes
+        // one prompt, after which SetAlwaysAdmin comes back here and the task starts it.
+        if (Settings.AlwaysAdmin && task != AdminTask.Status.Ready && !renewing)
+        {
+            renewing = true;
+            try { string why = SetAlwaysAdmin(true); if (why != null) Log.Write("always run as administrator: not renewed, " + why); }
+            finally { renewing = false; }
+            return;
+        }
         ElevateWithPrompt();
     }
 
@@ -692,15 +801,17 @@ class Tray : ApplicationContext
         {
             Settings.AlwaysAdmin = false;
             Settings.Save();
-            if (Native.IsAdmin()) AdminTask.Delete(AdminTask.Name); // without the rights the task stays; unused, it does nothing
+            // Without the rights the task and the copy in Program Files stay. Unused, they do nothing, and only an administrator can change them.
+            if (Native.IsAdmin()) AdminTask.Uninstall(AdminTask.Name, AdminTask.ProtectedExe);
             Log.Write("always run as administrator: off");
             return null;
         }
         if (AdminTask.State() != AdminTask.Status.Ready)
         {
-            string sid = AdminTask.UserSid();
-            string why = Native.IsAdmin() ? AdminTask.Create(AdminTask.Name, Program.Exe, AdminTask.Arguments, sid, true) : AdminTask.Elevated("create " + sid);
-            if (why == null && AdminTask.State() != AdminTask.Status.Ready) why = "the task was not created (see memcontrol.log)";
+            string sid = AdminTask.UserSid(), home = Program.Folder.TrimEnd('\\');
+            string why = Native.IsAdmin() ? AdminTask.Install(AdminTask.Name, Program.Exe, AdminTask.ProtectedExe, home, sid, Program.InstanceArgs)
+                : AdminTask.Elevated("create " + sid + " \"" + home + "\"");
+            if (why == null && AdminTask.State() != AdminTask.Status.Ready) why = "the setup did not complete (see memcontrol.log)";
             if (why != null) return why;
         }
         Settings.AlwaysAdmin = true;
@@ -794,11 +905,12 @@ class MainWindow : Form
     readonly bool canAlways = AdminTask.Possible();
     DateTime lastTop = DateTime.MinValue;
     bool loading;
+    int range; // of the graph: 0 = an hour, 1 = a day, 2 = a week
 
     public MainWindow(Tray tray)
     {
         this.tray = tray;
-        Text = "MemControl";
+        Text = "MemControl " + Program.Version;
         Font = new Font("Segoe UI", 9.5f);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -808,6 +920,12 @@ class MainWindow : Form
 
         // Left column: RAM, kernel, graph, top programs.
         var head = Label("Memory (RAM)", 16, 12, true);
+        var slowLink = new LinkLabel { Text = "Why is it slow?", AutoSize = true, Left = 196, Top = 13 };
+        slowLink.LinkClicked += (o, e) => tray.ShowHealth();
+        var leakLink = new LinkLabel { Text = "Leak watch", AutoSize = true, Left = 304, Top = 13 };
+        leakLink.LinkClicked += (o, e) => tray.ShowLeaks();
+        Controls.Add(slowLink);
+        Controls.Add(leakLink);
         ram.SetBounds(16, 34, 360, 40); ram.Font = new Font("Segoe UI", 22f, FontStyle.Bold);
         ramBar.SetBounds(16, 78, 360, 14);
         ramSub.SetBounds(16, 96, 360, 18);
@@ -818,6 +936,16 @@ class MainWindow : Form
         kernel.SetBounds(16, 162, 360, 24); kernel.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
         kernelSub.SetBounds(16, 188, 360, 74); kernelSub.ForeColor = Color.DimGray;
         var gHead = Label("Last 60 minutes", 16, 266, true);
+        // The graph's range: the last hour from memory, a day or a week from the history on disk.
+        var ranges = new[] { "1 h", "24 h", "7 d" };
+        var titles = new[] { "Last 60 minutes", "Last 24 hours", "Last 7 days" };
+        for (int i = 0; i < ranges.Length; i++)
+        {
+            int index = i;
+            var link = new LinkLabel { Text = ranges[i], AutoSize = true, Left = 262 + i * 40, Top = 267 };
+            link.LinkClicked += (o, e) => { range = index; gHead.Text = titles[index]; Refresh(tray); };
+            Controls.Add(link);
+        }
         graph.SetBounds(16, 286, 360, 90);
         var tHead = Label("Top memory users", 16, 382, true);
         top.SetBounds(16, 402, 360, 264); top.View = View.Details; top.FullRowSelect = true; top.HeaderStyle = ColumnHeaderStyle.Nonclickable;
@@ -942,7 +1070,9 @@ class MainWindow : Form
         kernelSub.Text = string.Format("Paged {0:0.0} GB · nonpaged {1:0.0} GB. ", s.PagedGb, s.NonpagedGb)
             + (s.StuckFiles >= 0 ? string.Format("Likely leak: {0:0.0} GB ({1:0.00} M file objects). ", s.LeakGb, s.StuckFiles / 1e6) : "")
             + "Normally 1–2 GB in total.";
-        graph.Data = t.History;
+        if (t.KernelForecast != "") kernelSub.Text = string.Format("Paged {0:0.0} GB, nonpaged {1:0.0} GB. ", s.PagedGb, s.NonpagedGb) + t.KernelForecast;
+        graph.Span = range == 0 ? TimeSpan.FromHours(1) : range == 1 ? TimeSpan.FromHours(24) : TimeSpan.FromDays(7);
+        graph.Data = range == 0 ? t.History.Select(p => new GraphPoint(p.At, p.LoadPercent, p.KernelGb)).ToList() : t.LongHistory.Select(p => new GraphPoint(p.At, p.Load, p.KernelGb)).ToList();
         graph.Invalidate();
         bool isAdmin = Native.IsAdmin();
         admin.Text = isAdmin ? "Running as administrator: every area can be cleaned."
@@ -1006,7 +1136,8 @@ class Bar : Control
 
 class Graph : Control
 {
-    public List<Snapshot> Data = new List<Snapshot>();
+    public List<GraphPoint> Data = new List<GraphPoint>();
+    public TimeSpan Span = TimeSpan.FromHours(1);
     public Graph() { DoubleBuffered = true; BackColor = Color.White; }
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -1015,18 +1146,39 @@ class Graph : Control
         using (var grid = new Pen(Color.FromArgb(238, 240, 244)))
             for (int i = 1; i < 4; i++) g.DrawLine(grid, 1, Height * i / 4, Width - 2, Height * i / 4);
         if (Data.Count < 2) { TextRenderer.DrawText(g, "Collecting…", Font, ClientRectangle, Color.Gray); return; }
-        float step = (Width - 2) / 359f;
-        Draw(g, Color.FromArgb(40, 120, 220), s => s.LoadPercent / 100.0, step);
+        Draw(g, Color.FromArgb(40, 120, 220), s => s.Load / 100.0);
         double max = Math.Max(8, Data.Max(s => s.KernelGb) * 1.2);
-        Draw(g, Color.FromArgb(200, 60, 140), s => s.KernelGb / max, step);
+        Draw(g, Color.FromArgb(200, 60, 140), s => s.KernelGb / max);
         TextRenderer.DrawText(g, "RAM %", new Font("Segoe UI", 8f), new Point(4, 2), Color.FromArgb(40, 120, 220));
         TextRenderer.DrawText(g, "kernel (up to " + max.ToString("0") + " GB)", new Font("Segoe UI", 8f), new Point(52, 2), Color.FromArgb(200, 60, 140));
     }
-    void Draw(Graphics g, Color c, Func<Snapshot, double> y, float step)
+    // Points are placed by their time. A gap (the PC was off, or MemControl was closed) breaks the line.
+    void Draw(Graphics g, Color c, Func<GraphPoint, double> y)
     {
-        var points = new List<PointF>();
-        int start = 360 - Data.Count;
-        for (int i = 0; i < Data.Count; i++) points.Add(new PointF(1 + (start + i) * step, (float)(Height - 2 - Math.Max(0, Math.Min(1, y(Data[i]))) * (Height - 4))));
-        using (var pen = new Pen(c, 2f)) g.DrawLines(pen, points.ToArray());
+        DateTime start = DateTime.Now - Span;
+        double gap = Span.TotalHours <= 1 ? 60 : 1200; // seconds
+        var line = new List<PointF>();
+        using (var pen = new Pen(c, 2f))
+        {
+            for (int i = 0; i <= Data.Count; i++)
+            {
+                bool broken = i == Data.Count || (i > 0 && (Data[i].At - Data[i - 1].At).TotalSeconds > gap);
+                if (broken)
+                {
+                    if (line.Count > 1) g.DrawLines(pen, line.ToArray());
+                    line.Clear();
+                }
+                if (i == Data.Count) break;
+                if (Data[i].At < start) continue;
+                line.Add(new PointF(1 + (float)((Data[i].At - start).TotalSeconds / Span.TotalSeconds * (Width - 2)), (float)(Height - 2 - Math.Max(0, Math.Min(1, y(Data[i]))) * (Height - 4))));
+            }
+        }
     }
+}
+
+struct GraphPoint
+{
+    public DateTime At;
+    public double Load, KernelGb;
+    public GraphPoint(DateTime at, double load, double kernelGb) { At = at; Load = load; KernelGb = kernelGb; }
 }

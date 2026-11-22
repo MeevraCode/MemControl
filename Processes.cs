@@ -120,7 +120,11 @@ class ProcessWindow : Form
     DateTime lastSample = DateTime.MinValue;
     int sortColumn = 3; bool sortDown = true;
 
-    class Row { public string Name, Path; public int Pid, Count; public long Private, WorkingSet; public double Cpu; }
+    class Row { public string Name, Path = "", Command = "", Ports = ""; public int Pid, Count, Handles; public long Private, WorkingSet; public double Cpu, Io; }
+
+    readonly Dictionary<int, string[]> details = new Dictionary<int, string[]>(); // pid -> { start time, path, command line }, asked once per process
+    List<ProcInfo> before;
+    DateTime beforeAt = DateTime.MinValue;
 
     public ProcessWindow(Tray tray)
     {
@@ -128,19 +132,21 @@ class ProcessWindow : Form
         Text = "MemControl — Processes";
         Font = new Font("Segoe UI", 9.5f);
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(900, 620);
+        ClientSize = new Size(Math.Min(1180, Screen.PrimaryScreen.WorkingArea.Width - 40), 620);
+        int wide = ClientSize.Width - 24;
         MinimumSize = new Size(700, 400);
 
         var find = new Label { Text = "Filter:", AutoSize = true, Left = 12, Top = 15 };
         filter.SetBounds(60, 11, 260, 26);
         filter.TextChanged += (o, e) => Fill();
+        new ToolTip().SetToolTip(filter, "A name, a PID, a port number, or part of a path or command line");
         group.SetBounds(336, 12, 200, 24); group.Text = "Group by program";
         group.CheckedChanged += (o, e) => { BuildColumns(); Fill(); };
 
-        list.SetBounds(12, 44, 876, 500);
+        list.SetBounds(12, 44, wide, 500);
         list.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
         list.View = View.Details; list.FullRowSelect = true; list.MultiSelect = true; list.HideSelection = false;
-        list.ColumnClick += (o, e) => { if (sortColumn == e.Column) sortDown = !sortDown; else { sortColumn = e.Column; sortDown = e.Column >= 2; } Fill(); };
+        list.ColumnClick += (o, e) => { if (sortColumn == e.Column) sortDown = !sortDown; else { sortColumn = e.Column; sortDown = e.Column >= 2 && e.Column <= 6; } Fill(); };
         list.SelectedIndexChanged += (o, e) => UpdateButtons();
         list.KeyDown += (o, e) => { if (e.KeyCode == Keys.Delete) EndSelected(false); };
         BuildColumns();
@@ -153,7 +159,7 @@ class ProcessWindow : Form
         Button(locate, "Open file location", 590, y, (o, e) => Locate());
         foreach (var b in new[] { end, endTree, endAll, trim, locate }) b.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
         end.ForeColor = Color.FromArgb(190, 30, 45);
-        status.SetBounds(12, 592, 876, 22); status.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right; status.ForeColor = Color.DimGray;
+        status.SetBounds(12, 592, wide, 22); status.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right; status.ForeColor = Color.DimGray;
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("End process", null, (o, e) => EndSelected(false));
@@ -198,6 +204,10 @@ class ProcessWindow : Form
         list.Columns.Add("CPU %", 70, HorizontalAlignment.Right);
         list.Columns.Add("Memory (MB)", 110, HorizontalAlignment.Right);
         list.Columns.Add("Working set (MB)", 120, HorizontalAlignment.Right);
+        list.Columns.Add("Handles", 70, HorizontalAlignment.Right);
+        list.Columns.Add("I/O MB/s", 70, HorizontalAlignment.Right);
+        list.Columns.Add("Ports", 90);
+        list.Columns.Add("Command line", 260);
         list.Columns.Add("Path", 260);
     }
 
@@ -209,7 +219,37 @@ class ProcessWindow : Form
         refresh.Start();
     }
 
+    // Every process from one Windows call (Sys.Processes): the figures of Windows' own processes too, without
+    // administrator rights. The path and the command line are asked once per process, the listening ports every time.
     List<Row> Read()
+    {
+        var all = Sys.Processes();
+        if (all.Count == 0) return ReadSlow();
+        var now = DateTime.Now;
+        if (before != null) Sys.Rates(before, all, (now - beforeAt).TotalSeconds);
+        before = all;
+        beforeAt = now;
+        Dictionary<int, List<int>> ports;
+        try { ports = Sys.ListeningPorts(); } catch { ports = new Dictionary<int, List<int>>(); }
+        var rows = new List<Row>();
+        var alive = new HashSet<int>();
+        foreach (var p in all)
+        {
+            if (p.Pid == 0) continue;
+            alive.Add(p.Pid);
+            string started = p.Created.ToString();
+            string[] d;
+            if (!details.TryGetValue(p.Pid, out d) || d[0] != started) details[p.Pid] = d = new[] { started, ProcessTools.PathOf(p.Pid), Sys.CommandLine(p.Pid) ?? "" };
+            List<int> own;
+            rows.Add(new Row { Name = p.Name, Pid = p.Pid, Count = 1, Cpu = p.CpuPercent, Io = p.IoBytesPerSecond / 1048576.0, Private = p.PrivateBytes, WorkingSet = p.WorkingSet,
+                Handles = p.Handles, Path = d[1], Command = d[2], Ports = ports.TryGetValue(p.Pid, out own) ? string.Join(", ", own) : "" });
+        }
+        foreach (var gone in details.Keys.Where(pid => !alive.Contains(pid)).ToList()) details.Remove(gone);
+        return rows;
+    }
+
+    // The older way, for a Windows where the fast listing is not available.
+    List<Row> ReadSlow()
     {
         var rows = new List<Row>();
         var now = DateTime.Now;
@@ -242,17 +282,22 @@ class ProcessWindow : Form
 
     List<Row> current = new List<Row>();
 
-    void Fill()
+    public void Fill()
     {
         var rows = Read();
         string f = filter.Text.Trim();
-        if (f != "") rows = rows.Where(r => r.Name.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0 || r.Path.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0 || r.Pid.ToString() == f).ToList();
+        // The filter: part of a name, path or command line, or a number that is a PID or a listening port.
+        if (f != "") rows = rows.Where(r => r.Name.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0 || r.Path.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0
+            || r.Command.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0 || r.Pid.ToString() == f || r.Ports.Split(new[] { ", " }, StringSplitOptions.None).Contains(f)).ToList();
         if (group.Checked)
             rows = rows.GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase).Select(g => new Row {
                 Name = g.Key, Pid = g.First().Pid, Count = g.Count(), Cpu = g.Sum(r => r.Cpu), Private = g.Sum(r => r.Private),
-                WorkingSet = g.Sum(r => r.WorkingSet), Path = g.Select(r => r.Path).FirstOrDefault(p => p != "") ?? "" }).ToList();
+                WorkingSet = g.Sum(r => r.WorkingSet), Handles = g.Sum(r => r.Handles), Io = g.Sum(r => r.Io),
+                Ports = string.Join(", ", g.Where(r => r.Ports != "").Select(r => r.Ports)), Path = g.Select(r => r.Path).FirstOrDefault(p => p != "") ?? "" }).ToList();
         Func<Row, IComparable> key = r => sortColumn == 0 ? (IComparable)r.Name.ToLowerInvariant() : sortColumn == 1 ? (IComparable)(group.Checked ? r.Count : r.Pid)
-            : sortColumn == 2 ? (IComparable)r.Cpu : sortColumn == 3 ? (IComparable)r.Private : sortColumn == 4 ? (IComparable)r.WorkingSet : r.Path.ToLowerInvariant();
+            : sortColumn == 2 ? (IComparable)r.Cpu : sortColumn == 3 ? (IComparable)r.Private : sortColumn == 4 ? (IComparable)r.WorkingSet
+            : sortColumn == 5 ? (IComparable)r.Handles : sortColumn == 6 ? (IComparable)r.Io : sortColumn == 7 ? (IComparable)r.Ports
+            : sortColumn == 8 ? (IComparable)r.Command.ToLowerInvariant() : r.Path.ToLowerInvariant();
         rows = (sortDown ? rows.OrderByDescending(key) : rows.OrderBy(key)).ToList();
 
         var keep = new HashSet<string>(list.SelectedItems.Cast<ListViewItem>().Select(i => (string)i.Tag));
@@ -263,7 +308,8 @@ class ProcessWindow : Form
         {
             string tag = group.Checked ? "n:" + r.Name : "p:" + r.Pid;
             var item = new ListViewItem(new[] { r.Name, group.Checked ? r.Count.ToString() : r.Pid.ToString(), r.Cpu.ToString("0.0"),
-                (r.Private / (1 << 20)).ToString("N0"), (r.WorkingSet / (1 << 20)).ToString("N0"), r.Path }) { Tag = tag };
+                (r.Private / (1 << 20)).ToString("N0"), (r.WorkingSet / (1 << 20)).ToString("N0"), r.Handles.ToString("N0"), r.Io >= 0.05 ? r.Io.ToString("0.0") : "",
+                r.Ports, r.Command, r.Path }) { Tag = tag };
             if (ProcessTools.IsProtected(r.Name, r.Pid)) item.ForeColor = Color.Gray;
             if (keep.Contains(tag)) item.Selected = true;
             list.Items.Add(item);

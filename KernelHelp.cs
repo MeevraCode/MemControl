@@ -63,7 +63,7 @@ static class TextWindow
         var box = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Text = text, BackColor = Color.White,
             Left = 12, Top = 12, Width = 616, Height = 490, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
         var link = new LinkLabel { Text = linkText, AutoSize = true, Left = 12, Top = 520, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
-        link.LinkClicked += (o, e) => Process.Start(url);
+        link.LinkClicked += (o, e) => { try { Process.Start("explorer.exe", "\"" + url + "\""); } catch { } }; // through the shell: a copy with administrator rights must not start the browser with them
         var close = new Button { Text = "Close", Width = 100, Height = 30, Left = 528, Top = 516, Anchor = AnchorStyles.Bottom | AnchorStyles.Right, DialogResult = DialogResult.OK };
         form.Controls.AddRange(new Control[] { box, link, close });
         form.AcceptButton = close;

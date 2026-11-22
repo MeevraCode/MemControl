@@ -1,13 +1,15 @@
 {
-    "MemControl.cs":  "1e865bdb8744dd2e0d5a29dba95d04782f839fb7acfa108b360c81225ddeeace",
-    "Smart.cs":  "961e85a3e1e63e09a38381cb7dd65d9258e6a51b13b58f1ba1becdad331a6a4c",
-    "AdminTask.cs":  "15775376049680f71b46795dafc4cacfbbaeca343d3c57762677d043fb276bc6",
-    "Processes.cs":  "fb27f13c387254cfc19bea60ef8cea185cfdee1cd5126090622a2c450e36170e",
-    "KernelHelp.cs":  "53412a4fca2b20f167988726841ef8bc5a6b2ba7618549820f4d96607b649bcd",
-    "build.cmd":  "d2830f77123b4ee7d2ed467a249213981097568175997ee99293b3824f70bccb",
+    "MemControl.cs":  "9efdc2663f157e8d33dd55cc4ec655418de6ffc284c12f1db5bebc2ddf355cee",
+    "Smart.cs":  "b0cdb974c64aeba2fa8878ee1de24ce114cd3e54730d7eeeefa0327b31f2666c",
+    "AdminTask.cs":  "d918b2e77c11a094b891264e4a0cb191f2b1a1fa49db1aa0ccc6b10e4ba323bc",
+    "Health.cs":  "e4b78842252309d9f7ecc16c8eb5b2419727b2d2e56b1b0a90fece344e043655",
+    "Leaks.cs":  "67873c3492a393bfdbf8644d4282442554bb4847349d9f88424c376cc48bf435",
+    "Processes.cs":  "ba6292f1084ed105dcc38ac8c3fc40bfec211ad535cf9e99dd7b563dba09e73a",
+    "KernelHelp.cs":  "f0f06676ddcbb644e1a2f1aa17405360f18862652c6964b6500d416c50b5ac64",
+    "build.cmd":  "138e67eb95d68630ce853488322f7c4786a0161240332d4fa2e119b6670e9541",
     "install.ps1":  "96c030dfd421c98e6c83b429bbca6e5fc173c659b4ae2bbc4c6ace29d2d4f781",
-    "README.md":  "33b0ad7b132dcd896f818db4cc822b2bab5d3c0a20fd4d3a7a7e1a90f28094bc",
+    "README.md":  "f7cc69dc0ba2a71bbd0653cb93e9140ae7f6d4030955a1e809dad529ccb3802d",
     "tests/ProcessToolsTest.cs":  "4330b9e86fcb7d809c17db4a8820d665b6e08af991d9468fb45e313da2508788",
-    "tests/SmartTest.cs":  "f0d55480d23147c167284dcf67e2e1489da53fb961c1cdb4ffd0427046b0e5ac",
-    "tests/run-tests.cmd":  "400f1bf391d3b050f3eafff581936b502ab0b3a493c7100e904bbeacad559e35"
+    "tests/SmartTest.cs":  "75a440fc3695af8dd5b438f5d7ed771539585acceb7242e8af466f27a9bf821e",
+    "tests/run-tests.cmd":  "acd1c7d6e2c4527b1a9f49250ea1efcad2ee07368d1ca6f897e067b8a4a62266"
 }

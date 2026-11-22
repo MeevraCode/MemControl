@@ -13,14 +13,36 @@ class ProcInfo
 {
     public string Name = ""; // without ".exe", as Process.ProcessName gives it
     public int Pid, ParentPid, Handles, Threads;
-    public long Created, CpuTicks, PrivateBytes, PrivateWorkingSet, WorkingSet;
+    public long Created, CpuTicks, PrivateBytes, PrivateWorkingSet, WorkingSet, ReadBytes, WriteBytes;
+    public double CpuPercent, IoBytesPerSecond; // filled by Sys.Rates from two snapshots
 }
 
 static class Sys
 {
+    delegate bool EnumProc(IntPtr window, IntPtr param);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr window, out int pid);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr param);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] static extern bool IsHungAppWindow(IntPtr window);
     [DllImport("shell32.dll")] static extern int SHQueryUserNotificationState(out int state);
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr process, int infoClass, IntPtr buffer, int length, out int returned);
+    [DllImport("iphlpapi.dll")] static extern int GetExtendedTcpTable(IntPtr table, ref int size, bool order, int family, int tableClass, int reserved);
+
+    // One NtQuerySystemInformation answer of unknown size; null when Windows refuses. The caller frees it.
+    static IntPtr Query(int infoClass, int length)
+    {
+        while (true)
+        {
+            IntPtr buffer = Marshal.AllocHGlobal(length);
+            int returned;
+            int status = Native.NtQuerySystemInformation(infoClass, buffer, length, out returned);
+            if (status == 0) return buffer;
+            Marshal.FreeHGlobal(buffer);
+            if (status != unchecked((int)0xC0000004) || length >= (1 << 28)) return IntPtr.Zero;
+            length = Math.Max(length * 2, returned + 65536);
+        }
+    }
 
     /// <summary>
     /// Every process, from one NtQuerySystemInformation(SystemProcessInformation) call. It needs no administrator rights
@@ -30,36 +52,166 @@ static class Sys
     {
         var list = new List<ProcInfo>();
         if (IntPtr.Size != 8) return list;
-        int length = 1 << 20;
-        while (true)
+        IntPtr buffer = Query(5, 1 << 20);
+        if (buffer == IntPtr.Zero) return list;
+        try
         {
-            IntPtr buffer = Marshal.AllocHGlobal(length);
+            IntPtr e = buffer;
+            while (true)
+            {
+                int next = Marshal.ReadInt32(e);
+                int pid = (int)Marshal.ReadInt64(e, 80);
+                IntPtr namePtr = Marshal.ReadIntPtr(e, 64);
+                string name = namePtr == IntPtr.Zero ? (pid == 0 ? "Idle" : "") : Marshal.PtrToStringUni(namePtr, (ushort)Marshal.ReadInt16(e, 56) / 2);
+                if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 4);
+                list.Add(new ProcInfo {
+                    Name = name, Pid = pid, ParentPid = (int)Marshal.ReadInt64(e, 88), Threads = Marshal.ReadInt32(e, 4), Handles = Marshal.ReadInt32(e, 96),
+                    Created = Marshal.ReadInt64(e, 32), CpuTicks = Marshal.ReadInt64(e, 40) + Marshal.ReadInt64(e, 48),
+                    PrivateWorkingSet = Marshal.ReadInt64(e, 8), WorkingSet = Marshal.ReadInt64(e, 144), PrivateBytes = Marshal.ReadInt64(e, 200),
+                    ReadBytes = Marshal.ReadInt64(e, 232), WriteBytes = Marshal.ReadInt64(e, 240),
+                });
+                if (next == 0) break;
+                e = e + next;
+            }
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+        return list;
+    }
+
+    /// <summary>Fills CpuPercent (of the whole processor) and IoBytesPerSecond from a snapshot taken the given seconds earlier.</summary>
+    public static void Rates(List<ProcInfo> before, List<ProcInfo> now, double seconds)
+    {
+        if (seconds <= 0 || before == null) return;
+        var old = new Dictionary<int, ProcInfo>();
+        foreach (var p in before) old[p.Pid] = p;
+        foreach (var p in now)
+        {
+            ProcInfo b;
+            if (!old.TryGetValue(p.Pid, out b) || b.Created != p.Created) continue;
+            p.CpuPercent = Math.Max(0, (p.CpuTicks - b.CpuTicks) / 1e7 / seconds / Environment.ProcessorCount * 100);
+            p.IoBytesPerSecond = Math.Max(0, (p.ReadBytes + p.WriteBytes - b.ReadBytes - b.WriteBytes) / seconds);
+        }
+    }
+
+    /// <summary>The top programs by a value, processes of one program added up: "game 25%, browser 7%". Values under atLeast are left out.</summary>
+    public static string Top(IEnumerable<ProcInfo> processes, Func<ProcInfo, double> value, int count, Func<double, string> text, double atLeast)
+    {
+        return string.Join(", ", processes.Where(p => p.Name != "" && p.Pid != 0).GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(g => new { Name = g.Key, Value = g.Sum(value) }).Where(g => g.Value >= atLeast)
+            .OrderByDescending(g => g.Value).Take(count).Select(g => g.Name + " " + text(g.Value)));
+    }
+
+    /// <summary>The largest holders of committed memory, grouped by program: "game 18.9 GB, browser 5.3 GB (18)".</summary>
+    public static string Largest(List<ProcInfo> processes, int count)
+    {
+        return string.Join(", ", processes.Where(p => p.Name != "").GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(g => new { Name = g.Key, Bytes = g.Sum(p => p.PrivateBytes), Count = g.Count() })
+            .OrderByDescending(g => g.Bytes).Take(count)
+            .Select(g => g.Name + " " + (g.Bytes / 1073741824.0).ToString("0.0") + " GB" + (g.Count > 1 ? " (" + g.Count + ")" : "")));
+    }
+
+    /// <summary>The command line of a process this account may open (PROCESS_QUERY_LIMITED_INFORMATION), else null.</summary>
+    public static string CommandLine(int pid)
+    {
+        IntPtr h = Native.OpenProcess(0x1000, false, pid);
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            int needed;
+            NtQueryInformationProcess(h, 60, IntPtr.Zero, 0, out needed); // ProcessCommandLineInformation
+            if (needed <= 0 || needed > (1 << 20)) return null;
+            IntPtr buffer = Marshal.AllocHGlobal(needed);
             try
             {
-                int returned;
-                int status = Native.NtQuerySystemInformation(5, buffer, length, out returned);
-                if (status == unchecked((int)0xC0000004) && length < (1 << 28)) { length = Math.Max(length * 2, returned + 65536); continue; }
-                if (status != 0) return list;
-                IntPtr e = buffer;
-                while (true)
-                {
-                    int next = Marshal.ReadInt32(e);
-                    int pid = (int)Marshal.ReadInt64(e, 80);
-                    IntPtr namePtr = Marshal.ReadIntPtr(e, 64);
-                    string name = namePtr == IntPtr.Zero ? (pid == 0 ? "Idle" : "") : Marshal.PtrToStringUni(namePtr, (ushort)Marshal.ReadInt16(e, 56) / 2);
-                    if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 4);
-                    list.Add(new ProcInfo {
-                        Name = name, Pid = pid, ParentPid = (int)Marshal.ReadInt64(e, 88), Threads = Marshal.ReadInt32(e, 4), Handles = Marshal.ReadInt32(e, 96),
-                        Created = Marshal.ReadInt64(e, 32), CpuTicks = Marshal.ReadInt64(e, 40) + Marshal.ReadInt64(e, 48),
-                        PrivateWorkingSet = Marshal.ReadInt64(e, 8), WorkingSet = Marshal.ReadInt64(e, 144), PrivateBytes = Marshal.ReadInt64(e, 200),
-                    });
-                    if (next == 0) break;
-                    e = e + next;
-                }
-                return list;
+                if (NtQueryInformationProcess(h, 60, buffer, needed, out needed) != 0) return null;
+                int length = (ushort)Marshal.ReadInt16(buffer);
+                IntPtr text = Marshal.ReadIntPtr(buffer, 8);
+                return text == IntPtr.Zero ? "" : Marshal.PtrToStringUni(text, length / 2);
             }
             finally { Marshal.FreeHGlobal(buffer); }
         }
+        finally { Native.CloseHandle(h); }
+    }
+
+    /// <summary>The TCP ports each process listens on (IPv4 and IPv6), sorted.</summary>
+    public static Dictionary<int, List<int>> ListeningPorts()
+    {
+        var byPid = new Dictionary<int, List<int>>();
+        foreach (int family in new[] { 2, 23 }) // AF_INET, AF_INET6
+        {
+            int size = 0;
+            GetExtendedTcpTable(IntPtr.Zero, ref size, false, family, 3, 0); // TCP_TABLE_OWNER_PID_LISTENER
+            if (size <= 0) continue;
+            size += 4096;
+            IntPtr table = Marshal.AllocHGlobal(size);
+            try
+            {
+                if (GetExtendedTcpTable(table, ref size, false, family, 3, 0) != 0) continue;
+                int count = Marshal.ReadInt32(table), row = family == 2 ? 24 : 56, portAt = family == 2 ? 8 : 20, pidAt = family == 2 ? 20 : 52;
+                for (int i = 0; i < count; i++)
+                {
+                    IntPtr r = table + 4 + i * row;
+                    int raw = Marshal.ReadInt32(r, portAt), port = ((raw & 0xFF) << 8) | ((raw >> 8) & 0xFF), pid = Marshal.ReadInt32(r, pidAt);
+                    List<int> ports;
+                    if (!byPid.TryGetValue(pid, out ports)) byPid[pid] = ports = new List<int>();
+                    if (!ports.Contains(port)) ports.Add(port);
+                }
+            }
+            finally { Marshal.FreeHGlobal(table); }
+        }
+        foreach (var ports in byPid.Values) ports.Sort();
+        return byPid;
+    }
+
+    /// <summary>The processes that own a visible window Windows marks as not responding.</summary>
+    public static HashSet<int> HungPids()
+    {
+        var set = new HashSet<int>();
+        EnumWindows((window, param) =>
+        {
+            int pid;
+            if (IsWindowVisible(window) && IsHungAppWindow(window) && GetWindowThreadProcessId(window, out pid) != 0) set.Add(pid);
+            return true;
+        }, IntPtr.Zero);
+        return set;
+    }
+
+    /// <summary>When the Windows kernel started. With Fast Startup this survives Shut down; only Restart moves it.</summary>
+    public static DateTime BootTime()
+    {
+        IntPtr buffer = Marshal.AllocHGlobal(64);
+        try
+        {
+            int returned;
+            return Native.NtQuerySystemInformation(3, buffer, 48, out returned) == 0 ? DateTime.FromFileTime(Marshal.ReadInt64(buffer)) : DateTime.MinValue;
+        }
+        catch { return DateTime.MinValue; }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    /// <summary>The files of the loaded kernel modules (drivers and Windows itself), as full paths.</summary>
+    public static List<string> KernelModules()
+    {
+        var list = new List<string>();
+        IntPtr buffer = Query(11, 1 << 18);
+        if (buffer == IntPtr.Zero) return list;
+        try
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            int count = Marshal.ReadInt32(buffer);
+            for (int i = 0; i < count; i++)
+            {
+                string p = Marshal.PtrToStringAnsi(buffer + 8 + i * 296 + 40) ?? "";
+                if (p.StartsWith(@"\SystemRoot\", StringComparison.OrdinalIgnoreCase)) p = Path.Combine(windows, p.Substring(12));
+                else if (p.StartsWith(@"\??\")) p = p.Substring(4);
+                else if (p.StartsWith(@"\Windows\", StringComparison.OrdinalIgnoreCase)) p = Path.Combine(Path.GetPathRoot(windows), p.Substring(1));
+                else if (p.IndexOf('\\') < 0) p = Path.Combine(windows, @"System32\drivers", p);
+                if (p != "" && !list.Contains(p, StringComparer.OrdinalIgnoreCase)) list.Add(p);
+            }
+        }
+        catch { }
+        finally { Marshal.FreeHGlobal(buffer); }
+        return list;
     }
 
     /// <summary>The process that owns the window in front, or 0.</summary>
@@ -81,15 +233,6 @@ static class Sys
     {
         int state = NotificationState();
         return state == 2 || state == 3 || state == 4;
-    }
-
-    /// <summary>The largest holders of committed memory, grouped by program: "game 18.9 GB, browser 5.3 GB (18)".</summary>
-    public static string Largest(List<ProcInfo> processes, int count)
-    {
-        return string.Join(", ", processes.Where(p => p.Name != "").GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(g => new { Name = g.Key, Bytes = g.Sum(p => p.PrivateBytes), Count = g.Count() })
-            .OrderByDescending(g => g.Bytes).Take(count)
-            .Select(g => g.Name + " " + (g.Bytes / 1073741824.0).ToString("0.0") + " GB" + (g.Count > 1 ? " (" + g.Count + ")" : "")));
     }
 }
 

@@ -1,39 +1,30 @@
-# STATE — MemControl (2026-11-22, po 1 paketo)
+# STATE — MemControl 1.1.0 (2026-11-22)
 
 ## Kas yra dabar
-- 1 paketas (`dff5c76`) sujungtas į `main` (fast-forward); į `origin` (github.com/MeevraCode/MemControl) nestumta.
-  Šaka `claude/smart-cleaning` palikta.
-- `MemControl.exe` sukompiliuotas iš naujo kodo (2026-11-22 21:54:34). Senasis: `MemControl.before-smart.old.exe`.
-- `build.cmd` exit 0; `tests\run-tests.cmd` exit 0 (21 + 65 patikrinimai).
-- Programa po build dar nepaleista.
+- Versija 1.1.0. Kodas, testai ir build baigti; `MemControl.exe` sukompiliuotas 2026-11-22 22:51:59.
+- `build.cmd` exit 0; `tests\run-tests.cmd` exit 0 (137 patikrinimai); `/admin-test` su tikromis teisėmis praėjo (15).
+- Išleidimas: žr. WORKLOG eilutę 004 ir GitHub leidimą v1.1.0 (github.com/MeevraCode/MemControl).
+- Programa savininko PC po build dar nepaleista. Senasis exe: `MemControl.before-smart.old.exe`.
 
-## Kas padaryta 1 pakete
-1. „Always (no prompt)": suplanuota užduotis `MemControl` paleidžia programą su administratoriaus teisėmis be UAC kaskart.
-2. Automatinis valymas: laukimas ilgėja (5, 15, 30 min), „Gentle" palieka užimtas ir priekinę programą, pauzė pilno ekrano metu,
-   sąrašas „Never clean".
-3. Commit įspėjimas nuo pasiekiamų lubų (85 % ir 93 %), „Explain" langas, didžiausi turėtojai.
+## Kas yra programoje
+1. Valymas: rankinis, automatinis su atsitraukimu, „Gentle", pauzė pilno ekrano metu, „Never clean".
+2. „Always (no prompt)": kopija `%ProgramFiles%\MemControl` ir užduotis `MemControl`; failų darbas per apribotą tokeną.
+3. Įspėjimai: kernel atmintis (4 ir 8 GB), commit (85 % ir 93 % pasiekiamų lubų).
+4. „Why is it slow?": 13–14 eilučių su spalva, skaičiumi ir patarimu.
+5. „Leak watch": augančios programos, kernel atmintis pagal savininką, zombiai, prognozė iš istorijos diske.
+6. Procesų tvarkyklė: komandinė eilutė, prievadai, handles, I/O; `/status` JSON.
 
-## NEPATIKRINTA (reikia savininko)
-- Užduotis su tikromis teisėmis: pažymėti „Always (no prompt)" ir patvirtinti UAC. Tikėtina eiga ir ką žiūrėti:
-  `tasks/2026-11-22-003-pamatai.md`, skyrius „Not done / risks".
+## Nepatikrinta
+- Valymas po vieną procesą su administratoriaus teisėmis.
+- Ilgalaikiai dalykai su tikrais duomenimis: 24 h ir 7 d. grafikas, prognozė, augančių programų sąrašas.
 
-## Žinoma rizika (automatinė saugumo peržiūra, 2026-11-22)
-- „Always (no prompt)" užduotis su administratoriaus teisėmis ir be klausimo paleidžia exe iš aplanko, į kurį gali rašyti
-  naudotojo programos; pakeitusi tą failą, bet kuri iš jų gautų tas pačias teises. Funkcija pagal nutylėjimą išjungta,
-  kaina aprašyta README ir varnelės užuominoje.
-- Pasiūlytas sustiprinimas NEDARYTAS: įjungiant kopijuoti exe į `%ProgramFiles%\MemControl` ir užduotį nukreipti į tą kopiją
-  (po kiekvieno build reikėtų vieno UAC kopijai atnaujinti). Savininkas dėl jo neatsakė ir paprašė sujungti į `main`.
-- Susijusi senesnė silpnybė: pakelta kopija rašo `memcontrol.ini` ir `memcontrol.log` į naudotojo rašomą aplanką.
+## Likę sumanymai (nedaryti)
+- Žaidėjui: patikra prieš žaidimą, efektyvumo režimas fono programoms.
+- Programuotojui: kūrėjo įrankių grupė, „našlaičių" paieška, įspėjimas apie staiga išaugusį procesą.
+- README paveikslus perdaryti po kiekvieno lango pakeitimo: `tests\SmartTest.exe /shots FOLDER demo`.
 
-## Likusios spragos
-- Istorija tik 60 min ir tik atmintyje: nėra ilgo grafiko, nuotėkio greičio, prognozės.
-- Iš pool žymų lentelės naudojama viena eilutė „File".
-- Procesų tvarkyklėje nėra komandinės eilutės, prievadų, handles, I/O; CPU % ten vis dar iš `TotalProcessorTime`
-  (dabar yra `Sys.Processes`, kuris duoda CPU ir sisteminiams procesams).
-
-## Laukia savininko sprendimo
-Paketai 2–5 iš `tasks/2026-11-22-002-nauju-funkciju-analize.md`: „Kodėl lėta?", nuotėkių sekimas, programuotojui, žaidėjui.
-Rekomenduota tvarka: 2, tada 3.
+## Video
+Reklaminis video daromas atskirai nuo kodo (žr. paskutinius WORKLOG įrašus). Kompiuteryje nėra `ffmpeg`.
 
 ## Bandymų mašina
 Laptopas: Ryzen 7 260 (Radeon 780M) ir GeForce RTX 5060 Laptop (8 GB), 32 GB RAM, Windows 11 26200.
