@@ -8,8 +8,10 @@
     "KernelHelp.cs":  "f0f06676ddcbb644e1a2f1aa17405360f18862652c6964b6500d416c50b5ac64",
     "build.cmd":  "138e67eb95d68630ce853488322f7c4786a0161240332d4fa2e119b6670e9541",
     "install.ps1":  "96c030dfd421c98e6c83b429bbca6e5fc173c659b4ae2bbc4c6ace29d2d4f781",
-    "README.md":  "f7cc69dc0ba2a71bbd0653cb93e9140ae7f6d4030955a1e809dad529ccb3802d",
+    "README.md":  "56280de4229badafce016570f1160ef87f1fb188491e83d41d5749083de2406d",
     "tests/ProcessToolsTest.cs":  "4330b9e86fcb7d809c17db4a8820d665b6e08af991d9468fb45e313da2508788",
     "tests/SmartTest.cs":  "0da55647608d8d3f698ac2f0c630f4a826d053b5693f7324cfbf98fd5dc995f5",
-    "tests/run-tests.cmd":  "acd1c7d6e2c4527b1a9f49250ea1efcad2ee07368d1ca6f897e067b8a4a62266"
+    "tests/run-tests.cmd":  "acd1c7d6e2c4527b1a9f49250ea1efcad2ee07368d1ca6f897e067b8a4a62266",
+    "video/video.html":  "5de151bb5f407e3094879b24daabc38d2b1edd9d129dec23529358557dd92670",
+    "video/make.mjs":  "aa15d0ccfc109ded7c95983b9fbdbb8f66e488f1249f170163c6e149b3e9dad4"
 }

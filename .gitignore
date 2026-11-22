@@ -4,3 +4,5 @@ memcontrol.log
 memcontrol-history.csv
 tests/*.exe
 *.old.exe
+video/*.mp4
+video/out/

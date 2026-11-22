@@ -24,7 +24,8 @@
 - README paveikslus perdaryti po kiekvieno lango pakeitimo: `tests\SmartTest.exe /shots FOLDER demo`.
 
 ## Video
-Reklaminis video daromas atskirai nuo kodo (žr. paskutinius WORKLOG įrašus). Kompiuteryje nėra `ffmpeg`.
+40 s video padarytas ir prisegtas prie leidimo v1.1.1 (`MemControl-1.1.mp4`); vietinė kopija `video/MemControl-1.1.mp4` (gitignore).
+Perdaryti: `node video/make.mjs FOLDER`. Kompiuteryje nėra `ffmpeg`, koduoja Chrome.
 
 ## Bandymų mašina
 Laptopas: Ryzen 7 260 (Radeon 780M) ir GeForce RTX 5060 Laptop (8 GB), 32 GB RAM, Windows 11 26200.

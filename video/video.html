@@ -1,0 +1,290 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MemControl video</title>
+<!-- The MemControl product video, drawn frame by frame on a canvas and encoded in the browser (WebCodecs, H.264 in MP4).
+     Made by make.mjs, which opens this page in headless Chrome and saves what the page sends back.
+     ?frames=3,20,30 sends only those moments as pictures, for a quick look. -->
+<body style="margin:0;background:#000"><canvas id="c" width="1920" height="1080" style="width:100vw"></canvas>
+<script>
+const W = 1920, H = 1080, FPS = 60, DURATION = 40;
+const c = document.getElementById('c'), g = c.getContext('2d', { alpha: false });
+const F = '"Segoe UI Variable Display", "Segoe UI", sans-serif';
+const GREEN = '#28a75a', YELLOW = '#e6a21e', RED = '#dc3545', BLUE = '#2878dc', PINK = '#c83c8c', DIM = 'rgba(255,255,255,0.66)';
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const ease = t => 1 - Math.pow(1 - clamp(t), 4);
+const span = (t, a, b) => clamp((t - a) / (b - a));
+const level = p => p >= 90 ? RED : p >= 75 ? YELLOW : GREEN;
+
+function T(s, x, y, size, color = '#fff', weight = 400, align = 'left') {
+  g.font = weight + ' ' + size + 'px ' + F; g.fillStyle = color; g.textAlign = align; g.textBaseline = 'alphabetic'; g.fillText(s, x, y);
+}
+function box(x, y, w, h, r, fill, stroke) {
+  g.beginPath(); g.roundRect(x, y, w, h, r);
+  if (fill) { g.fillStyle = fill; g.fill(); }
+  if (stroke) { g.strokeStyle = stroke; g.lineWidth = 1.5; g.stroke(); }
+}
+function panel(x, y, w, h, r = 26, fill = 'rgba(255,255,255,0.065)', stroke = 'rgba(255,255,255,0.13)') {
+  g.save(); g.shadowColor = 'rgba(0,0,0,0.5)'; g.shadowBlur = 60; g.shadowOffsetY = 20; box(x, y, w, h, r, fill); g.restore();
+  box(x + .75, y + .75, w - 1.5, h - 1.5, r, null, stroke);
+}
+// Draws fn with a fade and a small rise that start at t0.
+function el(t, t0, fn, dy = 34, dur = 0.7) {
+  const k = ease((t - t0) / dur);
+  if (k <= 0) return;
+  g.save(); g.globalAlpha *= k; g.translate(0, (1 - k) * dy); fn(k); g.restore();
+}
+function glow(x, y, r, color) {
+  const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, color); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(x - r, y - r, 2 * r, 2 * r);
+}
+function background(t) {
+  g.globalAlpha = 1; g.fillStyle = '#070b14'; g.fillRect(0, 0, W, H);
+  glow(W * 0.2 + Math.sin(t * 0.21) * 150, H * 0.18 + Math.cos(t * 0.17) * 70, 780, 'rgba(40,120,220,0.30)');
+  glow(W * 0.84 + Math.cos(t * 0.19) * 160, H * 0.86 + Math.sin(t * 0.15) * 90, 820, 'rgba(200,60,140,0.22)');
+  g.strokeStyle = 'rgba(255,255,255,0.03)'; g.lineWidth = 1; g.beginPath();
+  for (let x = (t * 8) % 96; x < W; x += 96) { g.moveTo(x, 0); g.lineTo(x, H); }
+  for (let y = 0; y < H; y += 96) { g.moveTo(0, y); g.lineTo(W, y); }
+  g.stroke();
+  const v = g.createRadialGradient(W / 2, H / 2, H * 0.45, W / 2, H / 2, H * 1.05); v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.55)');
+  g.fillStyle = v; g.fillRect(0, 0, W, H);
+}
+function scene(t, from, to, fn) {
+  if (t < from || t >= to) return;
+  g.save(); g.globalAlpha = ease((t - from) / 0.5) * (1 - ease((t - (to - 0.4)) / 0.4)); fn(t - from, to - from); g.restore();
+}
+function icon(x, y, size, percent) {
+  g.save(); g.shadowColor = level(percent); g.shadowBlur = size * 0.35; box(x, y, size, size, size * 0.22, level(percent)); g.restore();
+  T(String(Math.round(percent)), x + size / 2, y + size * 0.68, size * 0.52, '#fff', 700, 'center');
+}
+function heading(t, title, sub) {
+  el(t, 0.1, () => T(title, 140, 150, 72, '#fff', 650));
+  el(t, 0.3, () => T(sub, 142, 204, 32, DIM));
+}
+function dashed(x1, y1, x2, y2, color, dash = [12, 10], width = 2) {
+  g.save(); g.setLineDash(dash); g.strokeStyle = color; g.lineWidth = width; g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); g.restore();
+}
+
+// 1. The problem: RAM fills up, a cleaner frees it, and it fills up again.
+function problem(t) {
+  el(t, 0.2, () => T('Your PC feels slow.', W / 2, 330, 104, '#fff', 650, 'center'));
+  el(t, 0.9, () => {
+    const p = lerp(54, 91, ease(span(t, 1.2, 2.8)));
+    panel(460, 430, 1000, 210);
+    T('Memory (RAM)', 510, 492, 30, DIM, 600);
+    T(Math.round(p) + '% used', 510, 572, 72, level(p), 700);
+    box(900, 528, 510, 26, 13, 'rgba(255,255,255,0.12)'); box(900, 528, 510 * p / 100, 26, 13, level(p));
+  });
+  el(t, 3.0, () => T('A cleaner frees it. Two minutes later it is full again.', W / 2, 740, 40, DIM, 400, 'center'));
+}
+
+// 2. The name.
+function title(t) {
+  const p = lerp(91, 47, ease(span(t, 0.7, 2.0)));
+  el(t, 0.1, () => icon(360, 410, 220, p), 0);
+  el(t, 0.4, () => T('MemControl', 640, 540, 150, '#fff', 700));
+  el(t, 1.6, () => T('Frees RAM. Then shows what a cleaner cannot fix.', 646, 620, 42, DIM));
+}
+
+// 3. Smarter cleaning.
+function cleaning(t) {
+  heading(t, 'Smarter cleaning', 'It cleans when it helps, and stays out of the way when it does not.');
+  el(t, 0.6, () => {
+    panel(140, 260, 1000, 430);
+    T('Automatic cleaning backs off', 190, 330, 34, '#fff', 600);
+    const x0 = 200, x1 = 1080, y = 500;
+    g.strokeStyle = 'rgba(255,255,255,0.25)'; g.lineWidth = 3; g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+    [[0, ''], [5, '+5 min'], [20, '+15 min'], [50, '+30 min']].forEach(([m, label], i) => {
+      const k = ease(span(t, 1.2 + i * 0.75, 1.9 + i * 0.75));
+      if (k <= 0) return;
+      const x = lerp(x0, x1, m / 60);
+      g.save(); g.globalAlpha *= k;
+      g.strokeStyle = BLUE; g.lineWidth = 3; g.globalAlpha *= 1 - k * 0.7; g.beginPath(); g.arc(x, y, 16 + k * 20, 0, 7); g.stroke();
+      g.restore(); g.save(); g.globalAlpha *= k;
+      g.shadowColor = BLUE; g.shadowBlur = 26; g.fillStyle = BLUE; g.beginPath(); g.arc(x, y, 15, 0, 7); g.fill(); g.restore();
+      g.save(); g.globalAlpha *= k; T(label, x, y - 46, 28, '#fff', 600, 'center'); g.restore();
+    });
+    T('0', x0, y + 52, 24, DIM, 400, 'center'); T('60 min', x1, y + 52, 24, DIM, 400, 'center');
+    el(t, 4.2, () => { T('Programs take their memory straight back,', 190, 616, 26, DIM); T('so cleaning in a loop only slows the PC.', 190, 654, 26, DIM); });
+  });
+  [['Gentle', 'Only programs that have done nothing for 3 minutes.', GREEN], ['Pauses during games', 'Nothing is cleaned while a game is in front.', BLUE], ['Never clean', 'Your own list of programs that no cleaning touches.', PINK]].forEach(([a, b, color], i) =>
+    el(t, 1.4 + i * 0.6, () => { panel(1190, 260 + i * 148, 590, 126); box(1190, 260 + i * 148, 8, 126, 4, color); T(a, 1230, 312 + i * 148, 34, '#fff', 650); T(b, 1230, 356 + i * 148, 21, DIM); }));
+  el(t, 3.4, () => { panel(140, 730, 1640, 110); T('Automatic', 190, 798, 30, '#fff', 600); T('paused: a full-screen program is in front', 1730, 798, 30, YELLOW, 500, 'right'); });
+}
+
+// 4. Why is it slow? The lines are the app's own.
+const ROWS = [
+  [0, 'Processor', '38% busy', 'Busiest: game 22%, browser 9%, editor 4%.'],
+  [2, 'Processor speed', '61% of its rated speed', 'Windows is slowing the processor to 61% to cool it. Clear the vents, check the fan.'],
+  [1, 'Temperature', 'system 96 °C · graphics 84 °C', 'It is running hot. Hot chips slow themselves down.'],
+  [1, 'Graphics', '97% busy · memory 7.6 of 8.0 GB', 'Graphics memory is almost full. Games stutter when it runs out.'],
+  [0, 'Disk', '7% busy · 3.2 MB/s', 'Most active: game 2.4 MB/s.'],
+  [1, 'Disk space', 'C: 212 GB free · D: 38 GB free (8%)', 'A drive is getting full. Leave at least a tenth of it free.'],
+  [0, 'Memory', 'RAM 71% · free 1.2 GB · cache 6.4 GB', 'Windows is not short of RAM right now.'],
+  [1, 'Windows kernel memory', '5.2 GB', 'A driver is leaking kernel memory. Cleaning cannot free it: Restart when convenient.'],
+];
+function slow(t) {
+  heading(t, 'Why is it slow?', 'One line for each cause, with what to do about it.');
+  const X = 140, Y = 250, PW = 1100, RH = 84, colors = [GREEN, YELLOW, RED], ink = ['#282c34', '#be7800', '#c82832'];
+  el(t, 0.5, () => {
+    g.save(); g.shadowColor = 'rgba(0,0,0,0.55)'; g.shadowBlur = 70; g.shadowOffsetY = 24; box(X, Y, PW, 86 + ROWS.length * RH, 20, '#f8f9fb'); g.restore();
+    T('Slowing this PC now: processor speed, temperature, graphics.', X + 34, Y + 56, 30, '#c82832', 700);
+    ROWS.forEach(([lv, name, value, advice], i) => el(t, 0.9 + i * 0.13, () => {
+      const y = Y + 86 + i * RH;
+      box(X + 16, y, PW - 32, RH - 8, 12, '#fff');
+      g.fillStyle = colors[lv]; g.beginPath(); g.arc(X + 50, y + 28, 10, 0, 7); g.fill();
+      T(name, X + 76, y + 37, 26, '#282c34', 700); T(value, X + PW - 44, y + 37, 26, ink[lv], 700, 'right'); T(advice, X + 76, y + 66, 19, '#696e76');
+    }, 18, 0.5));
+    [[1, 3.0, 5.6, RED], [3, 5.6, 9], [7, 7.4, 9]].forEach(([row, a, b, color = YELLOW]) => {
+      const k = ease(span(t, a, a + 0.5)) * (1 - ease(span(t, b - 0.3, b)));
+      if (k > 0) { g.save(); g.globalAlpha *= k; g.shadowColor = color; g.shadowBlur = 30; box(X + 16, Y + 86 + row * RH, PW - 32, RH - 8, 12, null, color); g.lineWidth = 4; g.stroke(); g.restore(); }
+    });
+  });
+  const note = (t0, color, a, b, c2, y) => el(t, t0, () => { panel(1290, y, 490, 220); box(1290, y, 8, 220, 4, color); T(a, 1330, y + 66, 36, '#fff', 650); T(b, 1330, y + 118, 23, DIM); T(c2, 1330, y + 154, 23, DIM); });
+  note(3.0, RED, 'Not RAM at all', 'The processor is cooled down to', '61% of its speed. No cleaner fixes that.', 290);
+  note(5.6, YELLOW, 'Graphics memory is full', 'Games stutter when it runs out.', 'Lower the texture quality.', 540);
+  note(7.4, YELLOW, 'A driver is leaking', 'Only a Restart frees kernel memory.', 'The leak watch finds the driver.', 790 - 250 + 250);
+}
+
+// 5. Leak watch.
+function leaks(t) {
+  heading(t, 'Leak watch', 'What keeps growing, and who owns it.');
+  el(t, 0.5, () => {
+    panel(140, 250, 940, 540);
+    T('Windows kernel memory, last 7 days', 190, 316, 32, '#fff', 600);
+    const x0 = 200, x1 = 1020, yb = 720, yt = 370, Y = gb => lerp(yb, yt, gb / 9), now = lerp(x0, x1, 0.74);
+    g.strokeStyle = 'rgba(255,255,255,0.18)'; g.lineWidth = 2; g.beginPath(); g.moveTo(x0, yb); g.lineTo(x1, yb); g.stroke();
+    dashed(x0, Y(4), x1, Y(4), YELLOW); T('4 GB', x1, Y(4) - 10, 22, YELLOW, 600, 'right');
+    dashed(x0, Y(8), x1, Y(8), RED); T('8 GB', x1, Y(8) - 10, 22, RED, 600, 'right');
+    const k = ease(span(t, 1.0, 3.0)), n = 80;
+    g.save(); g.shadowColor = PINK; g.shadowBlur = 22; g.strokeStyle = PINK; g.lineWidth = 5; g.lineJoin = 'round'; g.beginPath();
+    for (let i = 0; i <= n * k; i++) { const u = i / n, x = lerp(x0, now, u), y = Y(2 + 3.2 * u + Math.sin(u * 23) * 0.07); i ? g.lineTo(x, y) : g.moveTo(x, y); }
+    g.stroke(); g.restore();
+    const f = ease(span(t, 3.2, 4.4));
+    if (f > 0) {
+      const xe = lerp(now, x1, f), ye = lerp(Y(5.2), Y(8), f);
+      dashed(now, Y(5.2), xe, ye, PINK, [10, 9], 4);
+      g.fillStyle = PINK; g.beginPath(); g.arc(now, Y(5.2), 9, 0, 7); g.fill();
+      el(t, 4.2, () => { box(740, 300, 300, 52, 26, RED); T('red in about 2 days', 890, 336, 26, '#fff', 650, 'center'); }, 10);
+    }
+    el(t, 3.4, () => T('It has grown about 1.4 GB a day since the last restart.', 190, 768, 25, DIM));
+  });
+  el(t, 0.9, () => {
+    panel(1120, 250, 660, 540);
+    T('Kernel memory by owner', 1166, 316, 32, '#fff', 600);
+    [['File', 'Windows: open files', '1,240 MB', '+1,180', RED], ['FMfn', 'Filter Manager', '980 MB', '+930', RED], ['Gfx1', 'displaydriver.sys', '164 MB', '+61', YELLOW], ['MmSt', 'Memory manager', '210 MB', '+12', DIM], ['Ntff', 'NTFS file system', '96 MB', '+4', DIM]].forEach(([tag, owner, size, grown, color], i) =>
+      el(t, 1.5 + i * 0.16, () => { const y = 392 + i * 68; T(tag, 1166, y, 26, color, 700); T(owner, 1262, y, 24, '#fff'); T(size, 1610, y, 24, DIM, 400, 'right'); T(grown, 1740, y, 26, color, 700, 'right'); box(1160, y + 22, 580, 1.5, 0, 'rgba(255,255,255,0.08)'); }, 14, 0.5));
+    el(t, 4.8, () => { box(1166, 716, 568, 50, 25, 'rgba(230,162,30,0.16)', YELLOW); T('Its owner is the driver to update.', 1450, 750, 24, '#fff', 600, 'center'); }, 10);
+  });
+  el(t, 2.4, () => { panel(140, 826, 1640, 110); T('Programs that keep growing', 190, 894, 30, '#fff', 600); T('editor-helper  +1.8 GB in 3 h      sync-agent  +41,200 handles', 1730, 894, 28, YELLOW, 500, 'right'); });
+}
+
+// 6. Two more things.
+function more(t) {
+  el(t, 0.2, () => {
+    panel(140, 300, 800, 480);
+    T('What holds port 3000?', 190, 380, 44, '#fff', 650);
+    box(190, 420, 420, 60, 10, 'rgba(255,255,255,0.1)', 'rgba(255,255,255,0.25)');
+    T('Filter:  ' + '3000'.slice(0, Math.floor(span(t, 0.8, 1.6) * 4.99)), 212, 461, 30, '#fff');
+    el(t, 1.7, () => { box(190, 520, 700, 64, 10, 'rgba(40,120,220,0.25)', BLUE); T('node', 214, 562, 28, '#fff', 600); T('PID 18324', 330, 562, 26, DIM); T('3000', 520, 562, 28, YELLOW, 700); T('node server.js', 620, 562, 26, '#fff'); }, 14);
+    el(t, 2.0, () => T('The process manager shows command lines and ports.', 190, 660, 26, DIM));
+  });
+  el(t, 0.5, () => {
+    panel(980, 300, 800, 480);
+    T('Administrator rights,', 1030, 380, 44, '#fff', 650); T('without the prompt', 1030, 436, 44, '#fff', 650);
+    g.save(); g.translate(1640, 420); g.fillStyle = GREEN; g.shadowColor = GREEN; g.shadowBlur = 40; g.beginPath(); g.moveTo(0, -70); g.lineTo(62, -44); g.lineTo(62, 10); g.quadraticCurveTo(62, 70, 0, 96); g.quadraticCurveTo(-62, 70, -62, 10); g.lineTo(-62, -44); g.closePath(); g.fill(); g.restore();
+    g.save(); g.strokeStyle = '#fff'; g.lineWidth = 12; g.lineCap = 'round'; g.lineJoin = 'round'; g.beginPath(); g.moveTo(1612, 430); g.lineTo(1634, 454); g.lineTo(1672, 404); g.stroke(); g.restore();
+    el(t, 1.2, () => { T('The task starts a copy in Program Files', 1030, 560, 28, DIM); T('that other programs cannot replace.', 1030, 600, 28, DIM); });
+    el(t, 1.9, () => T('C:\\Program Files\\MemControl', 1030, 690, 28, GREEN, 600));
+  });
+}
+
+// 7. The end card.
+function end(t) {
+  el(t, 0.1, () => icon(W / 2 - 80, 250, 160, 47), 0);
+  el(t, 0.3, () => T('MemControl', W / 2, 560, 130, '#fff', 700, 'center'));
+  el(t, 0.7, () => T('Free and open source', W / 2, 640, 44, DIM, 400, 'center'));
+  el(t, 1.1, () => { box(W / 2 - 420, 700, 840, 84, 42, 'rgba(255,255,255,0.08)', 'rgba(255,255,255,0.22)'); T('github.com/MeevraCode/MemControl', W / 2, 756, 40, '#fff', 600, 'center'); });
+  el(t, 1.5, () => T('Windows 10 and 11  ·  one small exe  ·  no install', W / 2, 850, 28, DIM, 400, 'center'));
+}
+
+function frame(t) {
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  background(t);
+  scene(t, 0, 4.7, problem); scene(t, 4.7, 9, title); scene(t, 9, 15.6, cleaning); scene(t, 15.6, 25, slow);
+  scene(t, 25, 32.6, leaks); scene(t, 32.6, 36.6, more); scene(t, 36.6, DURATION + 1, end);
+}
+
+// MP4 (ISO base media) with one H.264 track: ftyp, moov, mdat.
+const u32 = (...v) => { const b = new Uint8Array(v.length * 4), d = new DataView(b.buffer); v.forEach((x, i) => d.setUint32(i * 4, x >>> 0)); return b; };
+const u16 = (...v) => { const b = new Uint8Array(v.length * 2), d = new DataView(b.buffer); v.forEach((x, i) => d.setUint16(i * 2, x)); return b; };
+const str = s => new TextEncoder().encode(s);
+function atom(type, ...parts) {
+  const size = 8 + parts.reduce((a, p) => a + p.length, 0), b = new Uint8Array(size);
+  new DataView(b.buffer).setUint32(0, size); b.set(str(type), 4);
+  let o = 8; for (const p of parts) { b.set(p, o); o += p.length; }
+  return b;
+}
+function mux(samples, avcc) {
+  const n = samples.length, scale = 60000, delta = scale / FPS, matrix = u32(0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000), ms = Math.round(n * 1000 / FPS);
+  const keys = samples.map((s, i) => s.key ? i + 1 : 0).filter(Boolean);
+  const stbl = offset => atom('stbl',
+    atom('stsd', u32(0, 1), atom('avc1', new Uint8Array(6), u16(1), u16(0, 0), u32(0, 0, 0), u16(W, H), u32(0x480000, 0x480000, 0), u16(1), new Uint8Array(32), u16(0x18, 0xFFFF), atom('avcC', avcc))),
+    atom('stts', u32(0, 1, n, delta)), atom('stss', u32(0, keys.length, ...keys)), atom('stsc', u32(0, 1, 1, n, 1)),
+    atom('stsz', u32(0, 0, n, ...samples.map(s => s.data.length))), atom('stco', u32(0, 1, offset)));
+  const moov = offset => atom('moov',
+    atom('mvhd', u32(0, 0, 0, 1000, ms, 0x10000), u16(0x100, 0), u32(0, 0), matrix, u32(0, 0, 0, 0, 0, 0, 2)),
+    atom('trak',
+      atom('tkhd', u32(3, 0, 0, 1, 0, ms, 0, 0), u16(0, 0, 0, 0), matrix, u32(W << 16, H << 16)),
+      atom('mdia', atom('mdhd', u32(0, 0, 0, scale, n * delta), u16(0x55C4, 0)), atom('hdlr', u32(0, 0), str('vide'), u32(0, 0, 0), str('VideoHandler\0')),
+        atom('minf', atom('vmhd', u32(1), u16(0, 0, 0, 0)), atom('dinf', atom('dref', u32(0, 1), atom('url ', u32(1)))), stbl(offset)))));
+  const ftyp = atom('ftyp', str('isom'), u32(0x200), str('isomiso2avc1mp41'));
+  const offset = ftyp.length + moov(0).length + 8, total = samples.reduce((a, s) => a + s.data.length, 0);
+  return new Blob([ftyp, moov(offset), u32(total + 8), str('mdat'), ...samples.map(s => s.data)], { type: 'video/mp4' });
+}
+
+const say = text => fetch('/log', { method: 'POST', body: text }).catch(() => {});
+const send = (name, blob) => fetch('/upload?name=' + encodeURIComponent(name), { method: 'POST', body: blob });
+const picture = async (t, name) => { frame(t); await send(name, await new Promise(r => c.toBlob(r, 'image/png'))); };
+
+async function make() {
+  await document.fonts.load('600 40px "Segoe UI Variable Display"').catch(() => {});
+  const only = new URLSearchParams(location.search).get('frames');
+  if (only) { for (const t of only.split(',')) await picture(+t, 'frame-' + t + '.png'); return fetch('/done', { method: 'POST' }); }
+  let config = null;
+  for (const codec of ['avc1.64002A', 'avc1.4D402A', 'avc1.42E02A', 'avc1.42002A', 'avc1.42E034'])
+    for (const hardwareAcceleration of ['prefer-hardware', 'no-preference']) {
+      const candidate = { codec, hardwareAcceleration, width: W, height: H, bitrate: 14e6, framerate: FPS, latencyMode: 'quality', avc: { format: 'avc' } };
+      try { if (!config && (await VideoEncoder.isConfigSupported(candidate)).supported) config = candidate; } catch (e) { }
+    }
+  if (!config) { await say('no H.264 encoder is available in this browser'); return fetch('/done', { method: 'POST' }); }
+  await say('encoder: ' + config.codec + ', ' + config.hardwareAcceleration);
+  const samples = []; let avcc = null, failed = '';
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => {
+      if (meta && meta.decoderConfig && meta.decoderConfig.description) avcc = new Uint8Array(meta.decoderConfig.description);
+      const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data); samples.push({ data, key: chunk.type === 'key' });
+    },
+    error: e => { failed = e.message; },
+  });
+  encoder.configure(config);
+  const total = DURATION * FPS;
+  for (let i = 0; i < total && !failed; i++) {
+    frame(i / FPS);
+    const picture = new VideoFrame(c, { timestamp: Math.round(i * 1e6 / FPS), duration: Math.round(1e6 / FPS) });
+    encoder.encode(picture, { keyFrame: i % (FPS * 2) === 0 }); picture.close();
+    while (encoder.encodeQueueSize > 6) await new Promise(r => setTimeout(r, 4));
+    if (i % 300 === 0) await say('frame ' + i + ' of ' + total);
+  }
+  if (!failed) await encoder.flush();
+  if (failed || !avcc) { await say('encoding failed: ' + (failed || 'no decoder configuration')); return fetch('/done', { method: 'POST' }); }
+  const mp4 = mux(samples, avcc);
+  await send('MemControl-1.1.mp4', mp4);
+  const check = document.createElement('video'); check.muted = true; check.src = URL.createObjectURL(mp4);
+  await new Promise(r => { check.onloadeddata = r; check.onerror = r; setTimeout(r, 10000); });
+  await say('check: ' + check.videoWidth + 'x' + check.videoHeight + ', ' + check.duration.toFixed(2) + ' s, ' + samples.length + ' frames, ' + (mp4.size / 1048576).toFixed(1) + ' MB, error: ' + (check.error ? check.error.message : 'none'));
+  await picture(20.5, 'poster.png');
+  return fetch('/done', { method: 'POST' });
+}
+make().catch(e => say('failed: ' + e.message).then(() => fetch('/done', { method: 'POST' })));
+</script>

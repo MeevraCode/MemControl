@@ -4,6 +4,11 @@ A small Windows tray app that frees RAM, in the spirit of [Mem Reduct](https://g
 shows what a RAM cleaner cannot fix: a **kernel memory leak** caused by a driver, a program that keeps growing, and
 whatever else is slowing the PC down right now.
 
+[![Watch the 40-second tour](docs/video-poster.png)](https://github.com/MeevraCode/MemControl/releases/download/v1.1.1/MemControl-1.1.mp4)
+
+A 40-second tour: click the picture (MP4, 35 MB). The video is drawn and encoded by `node video/make.mjs`, with nothing
+but Node and Chrome.
+
 ![The main window](docs/main.png)
 
 ## What it does
