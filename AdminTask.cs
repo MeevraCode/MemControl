@@ -67,6 +67,19 @@ static class AdminTask
         catch { return false; }
     }
 
+    /// <summary>True for "Program Files\MemControl…\file": a folder whose name starts with MemControl, directly under Program Files.</summary>
+    public static bool UnderProgramFiles(string exe)
+    {
+        try
+        {
+            string root = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)).TrimEnd('\\');
+            string folder = Path.GetDirectoryName(Path.GetFullPath(exe));
+            return root != "" && string.Equals(Path.GetDirectoryName(folder), root, StringComparison.OrdinalIgnoreCase)
+                && Path.GetFileName(folder).StartsWith("MemControl", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     public static bool SameContent(string a, string b)
     {
         try
@@ -143,6 +156,8 @@ static class AdminTask
     /// </summary>
     public static string Install(string name, string sourceExe, string protectedExe, string home, string sid, string instanceArgs, bool highest = true)
     {
+        // With highest privileges the copy goes only into its own folder directly under Program Files, whatever was asked.
+        if (highest && !UnderProgramFiles(protectedExe)) return "the place for the copy is not a MemControl folder under Program Files";
         try
         {
             string folder = Path.GetDirectoryName(protectedExe);

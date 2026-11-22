@@ -30,7 +30,7 @@ static class Program
         Func<string, bool> has = flag => args.Any(a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
         Func<string, string> after = flag => { int at = Array.FindIndex(args, a => a.Equals(flag, StringComparison.OrdinalIgnoreCase)); return at >= 0 && at + 1 < args.Length ? args[at + 1] : null; };
         string named = after("/instance"), home = after("/home");
-        if (named != null && named.Length <= 32 && named.All(char.IsLetterOrDigit)) Instance = named;
+        if (named != null) Instance = CleanInstance(named);
         if (home != null && Path.IsPathRooted(home)) Home = home.TrimEnd('\\') + "\\";
         bool show = has("/show"), processes = has("/processes"), takeover = has("/takeover");
         if (has("/status")) return Status();
@@ -100,7 +100,7 @@ static class Program
         }
     }
 
-    public const string Version = "1.1.0";
+    public const string Version = "1.1.1";
 
     [DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
 
@@ -134,7 +134,13 @@ static class Program
 
     // For tests only ("/instance NAME" or the MEMCONTROL_INSTANCE variable): separate single-instance and task names,
     // so a test never meets your running copy.
-    public static string Instance = Environment.GetEnvironmentVariable("MEMCONTROL_INSTANCE") ?? "";
+    public static string Instance = CleanInstance(Environment.GetEnvironmentVariable("MEMCONTROL_INSTANCE"));
+
+    /// <summary>
+    /// The name becomes part of a task name and of a folder under Program Files. Only letters and digits pass, wherever
+    /// it comes from: anything else could point the administrator copy at a place outside Program Files.
+    /// </summary>
+    public static string CleanInstance(string name) { return name != null && name.Length <= 32 && name.All(char.IsLetterOrDigit) ? name : ""; }
     public static string InstanceArgs { get { return Instance == "" ? "" : " /instance " + Instance; } }
 }
 

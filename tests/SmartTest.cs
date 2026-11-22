@@ -309,6 +309,13 @@ static class SmartTest
             Check(AdminTask.State(name, copy, source, home) == AdminTask.Status.Outdated, "copy: after the exe was updated, it is outdated");
             Check(AdminTask.Install(name, source, copy, home, AdminTask.UserSid(), " /instance CopyTest", false) == null && AdminTask.State(name, copy, source, home) == AdminTask.Status.Ready, "copy: setting up again renews it");
             Check(AdminTask.Arguments(@"C:\My Folder\", " /instance X") == "/takeover /home \"C:\\My Folder\" /instance X", "copy: the folder is quoted without the trailing backslash");
+            string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            Check(AdminTask.UnderProgramFiles(AdminTask.ProtectedExe) && AdminTask.UnderProgramFiles(Path.Combine(programFiles, @"MemControlSelfTest\MemControl.exe")), "copy: its real place is a MemControl folder directly under Program Files");
+            Check(!AdminTask.UnderProgramFiles(copy) && !AdminTask.UnderProgramFiles(Path.Combine(programFiles, @"MemControl\..\..\Users\Public\MemControl\MemControl.exe"))
+                && !AdminTask.UnderProgramFiles(Path.Combine(programFiles, @"Other\MemControl.exe")) && !AdminTask.UnderProgramFiles(Path.Combine(programFiles, @"MemControl\deeper\MemControl.exe")), "copy: any other place does not count as protected, however the path is written");
+            Check(AdminTask.Install(name + "Refused", source, copy, home, AdminTask.UserSid(), "", true) != null, "copy: with highest privileges a place outside Program Files is refused");
+            Check(Program.CleanInstance("Test1") == "Test1" && Program.CleanInstance(@"..\..\Users\Public") == "" && Program.CleanInstance("a b") == "" && Program.CleanInstance(null) == "" && Program.CleanInstance(new string('a', 33)) == "",
+                "copy: a test name with anything but letters and digits is dropped, wherever it comes from");
             Check(AdminTask.Uninstall(name, copy) == null && !File.Exists(copy) && !Directory.Exists(Path.GetDirectoryName(copy)), "copy: removing takes the task, the copy and its folder away");
             Check(AdminTask.State(name, copy, source, home) == AdminTask.Status.Missing, "copy: then nothing is left");
         }

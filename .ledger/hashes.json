@@ -1,7 +1,7 @@
 {
-    "MemControl.cs":  "9efdc2663f157e8d33dd55cc4ec655418de6ffc284c12f1db5bebc2ddf355cee",
+    "MemControl.cs":  "ebfe9fd1e784483d1422da5fa0debeb6e15fd0fe37aa3791d20a600a11143fdd",
     "Smart.cs":  "b0cdb974c64aeba2fa8878ee1de24ce114cd3e54730d7eeeefa0327b31f2666c",
-    "AdminTask.cs":  "d918b2e77c11a094b891264e4a0cb191f2b1a1fa49db1aa0ccc6b10e4ba323bc",
+    "AdminTask.cs":  "87f3da0adc6f9bd5d43f45163cf22f0c6ae3a61dcb1cd147d721d75df0c1e06a",
     "Health.cs":  "e4b78842252309d9f7ecc16c8eb5b2419727b2d2e56b1b0a90fece344e043655",
     "Leaks.cs":  "67873c3492a393bfdbf8644d4282442554bb4847349d9f88424c376cc48bf435",
     "Processes.cs":  "ba6292f1084ed105dcc38ac8c3fc40bfec211ad535cf9e99dd7b563dba09e73a",
@@ -10,6 +10,6 @@
     "install.ps1":  "96c030dfd421c98e6c83b429bbca6e5fc173c659b4ae2bbc4c6ace29d2d4f781",
     "README.md":  "f7cc69dc0ba2a71bbd0653cb93e9140ae7f6d4030955a1e809dad529ccb3802d",
     "tests/ProcessToolsTest.cs":  "4330b9e86fcb7d809c17db4a8820d665b6e08af991d9468fb45e313da2508788",
-    "tests/SmartTest.cs":  "75a440fc3695af8dd5b438f5d7ed771539585acceb7242e8af466f27a9bf821e",
+    "tests/SmartTest.cs":  "0da55647608d8d3f698ac2f0c630f4a826d053b5693f7324cfbf98fd5dc995f5",
     "tests/run-tests.cmd":  "acd1c7d6e2c4527b1a9f49250ea1efcad2ee07368d1ca6f897e067b8a4a62266"
 }

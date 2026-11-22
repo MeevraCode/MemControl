@@ -1,9 +1,9 @@
 # STATE — MemControl 1.1.0 (2026-11-22)
 
 ## Kas yra dabar
-- Versija 1.1.0. Kodas, testai ir build baigti; `MemControl.exe` sukompiliuotas 2026-11-22 22:51:59.
-- `build.cmd` exit 0; `tests\run-tests.cmd` exit 0 (137 patikrinimai); `/admin-test` su tikromis teisėmis praėjo (15).
-- Išleidimas: žr. WORKLOG eilutę 004 ir GitHub leidimą v1.1.0 (github.com/MeevraCode/MemControl).
+- Versija 1.1.1 (1.1.0 ir saugumo pataisa, žr. užduotį 005). Kodas, testai ir build baigti.
+- `build.cmd` exit 0; `tests\run-tests.cmd` exit 0 (141 patikrinimas); `/admin-test` su tikromis teisėmis praėjo su 1.1.0 kodu (15).
+- Išleista GitHub: v1.1.0 ir v1.1.1 (github.com/MeevraCode/MemControl); naujausias yra v1.1.1.
 - Programa savininko PC po build dar nepaleista. Senasis exe: `MemControl.before-smart.old.exe`.
 
 ## Kas yra programoje
