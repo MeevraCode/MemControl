@@ -1,8 +1,8 @@
 # STATE — MemControl (2026-11-22, po 1 paketo)
 
 ## Kas yra dabar
-- 1 paketas komituotas šakoje `claude/smart-cleaning` (tėvas `0a39d39`); `main` nepakeista, į `origin`
-  (github.com/MeevraCode/MemControl) nestumta.
+- 1 paketas (`dff5c76`) sujungtas į `main` (fast-forward); į `origin` (github.com/MeevraCode/MemControl) nestumta.
+  Šaka `claude/smart-cleaning` palikta.
 - `MemControl.exe` sukompiliuotas iš naujo kodo (2026-11-22 21:54:34). Senasis: `MemControl.before-smart.old.exe`.
 - `build.cmd` exit 0; `tests\run-tests.cmd` exit 0 (21 + 65 patikrinimai).
 - Programa po build dar nepaleista.
@@ -16,6 +16,14 @@
 ## NEPATIKRINTA (reikia savininko)
 - Užduotis su tikromis teisėmis: pažymėti „Always (no prompt)" ir patvirtinti UAC. Tikėtina eiga ir ką žiūrėti:
   `tasks/2026-11-22-003-pamatai.md`, skyrius „Not done / risks".
+
+## Žinoma rizika (automatinė saugumo peržiūra, 2026-11-22)
+- „Always (no prompt)" užduotis su administratoriaus teisėmis ir be klausimo paleidžia exe iš aplanko, į kurį gali rašyti
+  naudotojo programos; pakeitusi tą failą, bet kuri iš jų gautų tas pačias teises. Funkcija pagal nutylėjimą išjungta,
+  kaina aprašyta README ir varnelės užuominoje.
+- Pasiūlytas sustiprinimas NEDARYTAS: įjungiant kopijuoti exe į `%ProgramFiles%\MemControl` ir užduotį nukreipti į tą kopiją
+  (po kiekvieno build reikėtų vieno UAC kopijai atnaujinti). Savininkas dėl jo neatsakė ir paprašė sujungti į `main`.
+- Susijusi senesnė silpnybė: pakelta kopija rašo `memcontrol.ini` ir `memcontrol.log` į naudotojo rašomą aplanką.
 
 ## Likusios spragos
 - Istorija tik 60 min ir tik atmintyje: nėra ilgo grafiko, nuotėkio greičio, prognozės.
